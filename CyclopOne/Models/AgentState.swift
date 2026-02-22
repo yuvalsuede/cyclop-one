@@ -37,14 +37,11 @@ struct AgentConfig {
     var maxIterations: Int = 20
     var toolTimeout: TimeInterval = 30
     var shellTimeout: TimeInterval = 60
-    /// Max pixel dimension for screenshot scaling. Anthropic API accepts images up to
-    /// ~8000px on the long edge. On Retina Macs, physical pixels are 2x logical points,
-    /// so a 1512-point-wide display is 3024 physical pixels. Using 2048 preserves enough
-    /// detail for Claude to read on-screen text clearly without excessive payload size.
-    /// Previous value of 1568 caused aggressive downscaling on Retina displays,
-    /// making text unreadable to Claude's vision.
-    var screenshotMaxDimension: Int = 2048
-    var screenshotJPEGQuality: Double = 0.8
+    /// Max pixel dimension for screenshot scaling. 1280 balances text readability
+    /// with payload size. JPEG at 0.85 quality keeps text sharp while keeping
+    /// screenshots ~200KB (vs ~900KB with PNG at 2048px).
+    var screenshotMaxDimension: Int = 1280
+    var screenshotJPEGQuality: Double = 0.85
     var confirmDestructiveActions: Bool = true
     var modelName: String = {
         let saved = UserDefaults.standard.string(forKey: "selectedModel")

@@ -464,8 +464,11 @@ class FloatingDot: NSPanel {
 
         pop.contentViewController = NSHostingController(rootView: popoverView)
 
+        // Anchor popover to the actual eye circle (48px centered in 64px panel)
+        let inset = (panelSize - dotSize) / 2
+        let dotRect = NSRect(x: inset, y: inset, width: dotSize, height: dotSize)
         pop.show(
-            relativeTo: contentView.bounds,
+            relativeTo: dotRect,
             of: contentView,
             preferredEdge: .minX
         )

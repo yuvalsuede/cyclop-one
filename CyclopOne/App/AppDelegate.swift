@@ -317,8 +317,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func checkFirstLaunch() {
         let hasLaunched = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         if !hasLaunched {
-            NSLog("CyclopOne [AppDelegate]: First launch — set API key via: /tmp/send_command setkey \"YOUR_KEY\"")
-            UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+            NSLog("CyclopOne [AppDelegate]: First launch — showing onboarding")
+            showOnboarding()
             return
         }
         // Check API key on a background thread to avoid blocking the main
@@ -346,9 +346,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.level = .floating
         window.contentView = NSHostingView(
             rootView: OnboardingView { [weak self] in
-                self?.onboardingWindow?.close()
-                self?.onboardingWindow = nil
                 UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+                // Hide instead of close — closing the NSHostingView
+                // during autorelease causes EXC_BAD_ACCESS.
+                self?.onboardingWindow?.orderOut(nil)
+                self?.floatingDot?.orderFront(nil)
             }
             .environmentObject(agentCoordinator)
         )

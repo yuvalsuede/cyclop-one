@@ -54,26 +54,26 @@ actor ScreenCaptureService {
 
     /// Quality presets for different use cases. Lower quality = smaller payloads = faster API calls.
     enum CaptureQuality {
-        /// Full quality for verification screenshots (PNG, max 2048px)
+        /// Full quality for verification screenshots (JPEG 0.9, max 1440px)
         case verification
-        /// Standard quality for routine screenshots (PNG, max 1568px)
+        /// Standard quality for routine screenshots (JPEG 0.85, max 1280px)
         case standard
-        /// Low quality for thumbnails/previews (JPEG 0.4, max 800px)
+        /// Low quality for thumbnails/previews (JPEG 0.5, max 800px)
         case preview
 
         var maxDimension: Int {
             switch self {
-            case .verification: return 2048
-            case .standard: return 1568
+            case .verification: return 1440
+            case .standard: return 1280
             case .preview: return 800
             }
         }
 
         var jpegQuality: Double {
             switch self {
-            case .verification: return 0.8
-            case .standard: return 0.6
-            case .preview: return 0.4
+            case .verification: return 0.9
+            case .standard: return 0.85
+            case .preview: return 0.5
             }
         }
     }
@@ -412,21 +412,21 @@ actor ScreenCaptureService {
     ) throws -> ScreenCapture {
         let bitmapRep = NSBitmapImageRep(cgImage: image)
 
-        // Use PNG for text-heavy screens (lossless, no JPEG artifacts).
-        // PNG produces sharper text that Claude's vision can read reliably.
-        // Fall back to JPEG only if PNG encoding fails.
+        // Use JPEG for speed — dramatically smaller payloads (200KB vs 900KB+).
+        // Claude's vision handles JPEG well at quality 0.8+.
+        // Fall back to PNG only if JPEG encoding fails.
         let imageData: Data
         let mediaType: String
 
-        if let pngData = bitmapRep.representation(using: .png, properties: [:]) {
-            imageData = pngData
-            mediaType = "image/png"
-        } else if let jpegData = bitmapRep.representation(
+        if let jpegData = bitmapRep.representation(
             using: .jpeg,
             properties: [.compressionFactor: quality]
         ) {
             imageData = jpegData
             mediaType = "image/jpeg"
+        } else if let pngData = bitmapRep.representation(using: .png, properties: [:]) {
+            imageData = pngData
+            mediaType = "image/png"
         } else {
             throw CaptureError.compressionFailed
         }

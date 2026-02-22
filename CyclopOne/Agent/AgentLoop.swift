@@ -37,8 +37,9 @@ actor AgentLoop {
     /// Sprint 19: Current iteration count for conversation pruning.
     private var iterationCount: Int = 0
 
-    /// Sprint 19: Number of iterations after which old screenshots are pruned from history.
-    private let screenshotPruneThreshold: Int = 2
+    /// Number of most-recent screenshots to keep in conversation history.
+    /// Only the latest screenshot is kept; older ones are replaced with "[screenshot removed]".
+    private let screenshotPruneThreshold: Int = 1
 
     /// Maximum number of messages in conversation history before oldest are evicted.
     /// Prevents unbounded memory growth. The first message (initial user prompt) is always kept.
@@ -108,11 +109,11 @@ actor AgentLoop {
             panel?.orderOut(nil)
         }
 
-        // Step 4: Fixed 300ms delay for the window server to fully process the hide
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Step 4: Brief delay for the window server to process the hide
+        try? await Task.sleep(nanoseconds: 150_000_000)
 
-        // Step 5: Poll until all Cyclop One windows are gone (up to another 300ms)
-        await waitForWindowsHidden(windowNumbers: windowNumbers, timeout: 300_000_000)
+        // Step 5: Poll until all Cyclop One windows are gone (up to 200ms)
+        await waitForWindowsHidden(windowNumbers: windowNumbers, timeout: 200_000_000)
 
         // Step 6: Verify no Cyclop One windows remain and log diagnostics.
         // Only check windows at normal layer (0) that we tried to hide.
@@ -310,7 +311,7 @@ actor AgentLoop {
                 }
             }
             // Give the app time to bring its windows to the front and render
-            try? await Task.sleep(nanoseconds: 600_000_000) // 600ms
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
         } else {
             targetAppPID = await MainActor.run { () -> pid_t? in
                 let currentPID = ProcessInfo.processInfo.processIdentifier
@@ -507,7 +508,7 @@ actor AgentLoop {
         }
 
         // Brief pause between iterations
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
         NSLog("CyclopOne [AgentLoop]: executeIteration — end (tool calls executed), iteration=%d, toolCount=%d, hasScreenshot=%d, tokens=%d/%d",
               iterationCount, response.toolUses.count, lastScreenshot != nil ? 1 : 0,
@@ -989,7 +990,7 @@ actor AgentLoop {
 
             await activateTargetApp()
             // Brief settle time after re-activation
-            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+            try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
         }
     }
 
