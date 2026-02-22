@@ -2,10 +2,10 @@ import Foundation
 
 // MARK: - MemoryService
 
-/// The agent's persistent memory — an Obsidian vault backed service that provides
+/// The agent's persistent memory — a markdown vault backed service that provides
 /// episodic, semantic, procedural, and working memory across runs.
 ///
-/// Vault location: ~/Library/Application Support/CyclopOne/Memory/
+/// Vault location: ~/.cyclopone/memory/
 ///
 /// Memory types:
 ///   - **Episodic** (tasks/task-log.md): What happened — run outcomes, durations, scores
@@ -13,8 +13,8 @@ import Foundation
 ///   - **Procedural** (tasks/task-templates/): How to do things — reusable action sequences
 ///   - **Working** (context/recent-actions.md): Current context — rolling window of recent actions
 ///
-/// The vault is structured as plain Markdown with YAML frontmatter, compatible with
-/// Obsidian for user browsing and editing. All I/O is serialised through this actor.
+/// The vault is stored as plain markdown files that users can browse and edit
+/// with any text editor or Obsidian. All I/O is serialised through this actor.
 actor MemoryService {
 
     // MARK: - Singleton
@@ -33,7 +33,7 @@ actor MemoryService {
     private let tokenCharRatio = 4.0
 
     /// Default memory token budget for system prompt injection.
-    private let defaultTokenBudget = 4000
+    private let defaultTokenBudget = 6000
 
     /// Core files that are always loaded into the system prompt.
     private let coreFiles = [
@@ -54,10 +54,12 @@ actor MemoryService {
     // MARK: - Init
 
     private init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.vaultRoot = appSupport
-            .appendingPathComponent("CyclopOne")
-            .appendingPathComponent("Memory")
+        // Store memory as plain markdown files in ~/.cyclopone/memory/
+        // Users can browse/edit with any text editor or Obsidian.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.vaultRoot = home
+            .appendingPathComponent(".cyclopone")
+            .appendingPathComponent("memory")
     }
 
     // MARK: - Vault Bootstrap
@@ -137,9 +139,9 @@ actor MemoryService {
 
         // Index page
         ensureFile("Index.md", default: """
-        # CyclopOne Brain
+        # Cyclop One Memory
 
-        Welcome to Cyclop One.s persistent memory vault.
+        Welcome to Cyclop One's persistent memory vault.
 
         ## Quick Links
         - [[Active Tasks]] — Current task list
@@ -172,7 +174,7 @@ actor MemoryService {
 
         for file in coreFiles {
             if let content = readFile(file) {
-                let trimmed = String(content.prefix(2000))
+                let trimmed = String(content.prefix(4000))
                 let label = file
                     .replacingOccurrences(of: ".md", with: "")
                     .replacingOccurrences(of: "identity/", with: "")
@@ -207,14 +209,14 @@ actor MemoryService {
 
         // Priority 1: User profile (always included)
         if let profile = readFile("identity/user-profile.md") {
-            sections.append((priority: 1, label: "user_profile", content: truncate(profile, maxChars: 1200)))
+            sections.append((priority: 1, label: "user_profile", content: truncate(profile, maxChars: 2400)))
         }
 
         // Priority 2: Recent context (working memory)
         if let recent = readFile("context/recent-actions.md") {
             let lastEntries = extractLastEntries(recent, count: 5)
             if !lastEntries.isEmpty {
-                sections.append((priority: 2, label: "recent_context", content: truncate(lastEntries, maxChars: 2000)))
+                sections.append((priority: 2, label: "recent_context", content: truncate(lastEntries, maxChars: 3000)))
             }
         }
 

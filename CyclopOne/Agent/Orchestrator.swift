@@ -449,6 +449,7 @@ actor Orchestrator {
         var totalOutput = totalOutput
         var iteration = startIteration
         var anyToolCallsExecuted = false
+        var anyVisualToolCalls = false
         var rejectedCompletions = 0
         let maxRejectedCompletions = 2
         var verificationInputTokens = 0
@@ -617,11 +618,13 @@ actor Orchestrator {
                 preActionScreenshot = ss
             }
 
-            // Track whether any tool calls were executed across the run.
-            // hasMoreWork is true only when Claude returned tool_use blocks
-            // that were executed (see AgentLoop.executeIteration).
+            // Track whether any tool calls were executed across the run,
+            // and whether any of those tools produce visual changes.
             if iterResult.hasMoreWork {
                 anyToolCallsExecuted = true
+                if iterResult.hasVisualToolCalls {
+                    anyVisualToolCalls = true
+                }
             }
 
             // Check completion marker or no-more-work as completion signals.
@@ -635,9 +638,10 @@ actor Orchestrator {
                 NSLog("CyclopOne [Orchestrator]: Completion signal detected — source=%@, iteration=%d, anyToolCalls=%d, rejectedSoFar=%d",
                       completionSource, iteration, anyToolCallsExecuted, rejectedCompletions)
 
-                // Skip visual verification for text-only runs (no tool calls executed).
+                // Skip visual verification when no visual tools were used.
                 // Verification scores visual/structural/output which only makes sense
                 // when the agent performed actions on screen.
+                // Cases: (1) no tool calls at all, (2) only non-visual tools (memory, vault, tasks).
                 let score: Int
                 let passed: Bool
                 let reason: String
@@ -646,6 +650,11 @@ actor Orchestrator {
                     passed = true
                     reason = "Text-only run, auto-pass"
                     NSLog("CyclopOne [Orchestrator]: Text-only run, skipping verification (auto-pass score=100)")
+                } else if !anyVisualToolCalls {
+                    score = 100
+                    passed = true
+                    reason = "Non-visual tools only, auto-pass"
+                    NSLog("CyclopOne [Orchestrator]: Non-visual tools only, skipping verification (auto-pass score=100)")
                 } else {
                     let verificationResult = await verificationEngine.verify(
                         command: command,

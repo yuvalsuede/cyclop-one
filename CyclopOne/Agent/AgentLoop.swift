@@ -12,6 +12,15 @@ import AppKit
 /// The legacy `run()` method still works as a convenience.
 actor AgentLoop {
 
+    /// Tools that do not produce visual changes on screen.
+    /// Used to determine whether verification scoring should be skipped.
+    private static let nonVisualTools: Set<String> = [
+        "remember", "recall",
+        "vault_read", "vault_write", "vault_search", "vault_list", "vault_append",
+        "task_create", "task_update", "task_list", "task_complete",
+        "shell_exec", "run_shell_command"
+    ]
+
     private let api = ClaudeAPIService.shared
     private let capture = ScreenCaptureService.shared
     private let executor = ActionExecutor.shared
@@ -42,8 +51,9 @@ actor AgentLoop {
     private let screenshotPruneThreshold: Int = 1
 
     /// Maximum number of messages in conversation history before oldest are evicted.
-    /// Prevents unbounded memory growth. The first message (initial user prompt) is always kept.
-    /// Claude API limit is ~200K tokens; keeping 20 messages ensures we stay well under.
+    /// Prevents unbounded memory growth. The first 2 messages (initial user prompt +
+    /// first assistant response) are always kept for task context.
+    /// 20 messages ≈ 10 turns (assistant+tool_result pairs), enough for multi-step tasks.
     private let maxConversationMessages: Int = 20
 
     /// Sprint 14: Track consecutive API failures for signaling to Orchestrator.
@@ -398,7 +408,8 @@ actor AgentLoop {
         guard !isCancelled else {
             return IterationResult(
                 textContent: "", hasMoreWork: false, screenshot: nil,
-                inputTokens: 0, outputTokens: 0, cancelled: true
+                inputTokens: 0, outputTokens: 0, cancelled: true,
+                hasVisualToolCalls: false
             )
         }
 
@@ -468,12 +479,14 @@ actor AgentLoop {
                 screenshot: latestScreenshot,
                 inputTokens: response.inputTokens,
                 outputTokens: response.outputTokens,
-                cancelled: false
+                cancelled: false,
+                hasVisualToolCalls: false
             )
         }
 
         // -- Execute tool calls --
         var lastScreenshot: ScreenCapture? = nil
+        var hasVisualToolCalls = false
         for toolUse in response.toolUses {
             if isCancelled {
                 return IterationResult(
@@ -482,8 +495,14 @@ actor AgentLoop {
                     screenshot: latestScreenshot,
                     inputTokens: response.inputTokens,
                     outputTokens: response.outputTokens,
-                    cancelled: true
+                    cancelled: true,
+                    hasVisualToolCalls: hasVisualToolCalls
                 )
+            }
+
+            // Track whether this tool produces visual changes
+            if !Self.nonVisualTools.contains(toolUse.name) {
+                hasVisualToolCalls = true
             }
 
             let toolResult = await executeToolCall(
@@ -510,8 +529,8 @@ actor AgentLoop {
         // Brief pause between iterations
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        NSLog("CyclopOne [AgentLoop]: executeIteration — end (tool calls executed), iteration=%d, toolCount=%d, hasScreenshot=%d, tokens=%d/%d",
-              iterationCount, response.toolUses.count, lastScreenshot != nil ? 1 : 0,
+        NSLog("CyclopOne [AgentLoop]: executeIteration — end (tool calls executed), iteration=%d, toolCount=%d, hasVisualTools=%d, hasScreenshot=%d, tokens=%d/%d",
+              iterationCount, response.toolUses.count, hasVisualToolCalls ? 1 : 0, lastScreenshot != nil ? 1 : 0,
               response.inputTokens, response.outputTokens)
 
         return IterationResult(
@@ -520,7 +539,8 @@ actor AgentLoop {
             screenshot: lastScreenshot ?? latestScreenshot,
             inputTokens: response.inputTokens,
             outputTokens: response.outputTokens,
-            cancelled: false
+            cancelled: false,
+            hasVisualToolCalls: hasVisualToolCalls
         )
     }
 
@@ -745,14 +765,26 @@ actor AgentLoop {
     func pruneConversationHistory() {
         // Enforce max conversation message count to prevent unbounded growth.
         // Keep the first message (initial user prompt) and the most recent messages.
+        //
+        // CRITICAL: After removing messages, we must also remove any orphaned
+        // tool_result blocks whose tool_use_id no longer matches a tool_use in
+        // the remaining history. The Claude API rejects orphaned tool_results.
         if conversationHistory.count > maxConversationMessages {
             let excess = conversationHistory.count - maxConversationMessages
-            // Remove oldest messages after the first one (preserve initial context)
-            let removeRange = 1..<(1 + excess)
-            conversationHistory.removeSubrange(removeRange)
-            NSLog("CyclopOne [AgentLoop]: Evicted %d oldest messages, history now %d messages",
-                  excess, conversationHistory.count)
+            // Preserve first 2 messages (initial user prompt + first assistant response)
+            let preserveCount = min(2, conversationHistory.count)
+            let maxRemovable = max(0, conversationHistory.count - preserveCount - 1)
+            let toRemove = min(excess, maxRemovable)
+            if toRemove > 0 {
+                conversationHistory.removeSubrange(preserveCount..<(preserveCount + toRemove))
+                NSLog("CyclopOne [AgentLoop]: Evicted %d oldest messages, history now %d messages",
+                      toRemove, conversationHistory.count)
+            }
         }
+
+        // Always clean up orphaned tool_result blocks — not just after eviction.
+        // Orphans can arise from API errors, partial responses, or other edge cases.
+        removeOrphanedToolResults()
 
         // Always prune — even early iterations benefit from smaller payloads
 
@@ -780,6 +812,68 @@ actor AgentLoop {
         if prunedBytes > 0 {
             let prunedKB = prunedBytes / 1024
             print("[AgentLoop] Pruned \(indicesToPrune.count) old screenshots from conversation history (~\(prunedKB)KB freed)")
+        }
+    }
+
+    /// Remove orphaned tool_result blocks from conversation history.
+    /// A tool_result is orphaned if its tool_use_id doesn't match any tool_use
+    /// block in a preceding assistant message. The Claude API rejects these.
+    private func removeOrphanedToolResults() {
+        // Collect all tool_use IDs from assistant messages
+        var validToolUseIDs = Set<String>()
+        for message in conversationHistory {
+            guard let role = message["role"] as? String, role == "assistant" else { continue }
+            guard let content = message["content"] as? [[String: Any]] else { continue }
+            for block in content {
+                if let type = block["type"] as? String, type == "tool_use",
+                   let id = block["id"] as? String {
+                    validToolUseIDs.insert(id)
+                }
+            }
+        }
+
+        // Find and remove messages that contain only orphaned tool_results
+        var indicesToRemove: [Int] = []
+        for (i, message) in conversationHistory.enumerated() {
+            guard let role = message["role"] as? String, role == "user" else { continue }
+            guard let content = message["content"] as? [[String: Any]] else { continue }
+
+            // Check if ALL content blocks are orphaned tool_results
+            let hasToolResults = content.contains { ($0["type"] as? String) == "tool_result" }
+            guard hasToolResults else { continue }
+
+            let allOrphaned = content.allSatisfy { block in
+                guard let type = block["type"] as? String, type == "tool_result" else {
+                    return false  // Non-tool_result blocks are fine
+                }
+                let toolUseId = block["tool_use_id"] as? String ?? ""
+                return !validToolUseIDs.contains(toolUseId)
+            }
+
+            if allOrphaned {
+                indicesToRemove.append(i)
+            } else {
+                // Filter out just the orphaned blocks, keep valid ones
+                let filtered = content.filter { block in
+                    guard let type = block["type"] as? String, type == "tool_result" else { return true }
+                    let toolUseId = block["tool_use_id"] as? String ?? ""
+                    return validToolUseIDs.contains(toolUseId)
+                }
+                if filtered.count < content.count {
+                    var modified = message
+                    modified["content"] = filtered
+                    conversationHistory[i] = modified
+                }
+            }
+        }
+
+        // Remove fully orphaned messages in reverse order
+        for i in indicesToRemove.reversed() {
+            conversationHistory.remove(at: i)
+        }
+
+        if !indicesToRemove.isEmpty {
+            NSLog("CyclopOne [AgentLoop]: Removed %d orphaned tool_result messages", indicesToRemove.count)
         }
     }
 
@@ -1542,4 +1636,8 @@ struct IterationResult {
 
     /// Whether the iteration was interrupted by cancellation.
     let cancelled: Bool
+
+    /// Whether any tool calls in this iteration produce visual changes on screen.
+    /// False when only non-visual tools (memory, vault, task) were called.
+    let hasVisualToolCalls: Bool
 }

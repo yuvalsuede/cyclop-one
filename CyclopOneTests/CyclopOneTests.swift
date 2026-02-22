@@ -1005,7 +1005,8 @@ final class IterationResultTests: XCTestCase {
             screenshot: nil,
             inputTokens: 100,
             outputTokens: 50,
-            cancelled: false
+            cancelled: false,
+            hasVisualToolCalls: false
         )
         XCTAssertFalse(result.hasMoreWork)
         XCTAssertFalse(result.cancelled)
@@ -1020,10 +1021,12 @@ final class IterationResultTests: XCTestCase {
             screenshot: nil,
             inputTokens: 200,
             outputTokens: 100,
-            cancelled: false
+            cancelled: false,
+            hasVisualToolCalls: true
         )
         XCTAssertTrue(result.hasMoreWork)
         XCTAssertFalse(result.cancelled)
+        XCTAssertTrue(result.hasVisualToolCalls)
     }
 
     func testIterationResult_cancelled() {
@@ -1033,7 +1036,8 @@ final class IterationResultTests: XCTestCase {
             screenshot: nil,
             inputTokens: 0,
             outputTokens: 0,
-            cancelled: true
+            cancelled: true,
+            hasVisualToolCalls: false
         )
         XCTAssertTrue(result.cancelled)
     }
