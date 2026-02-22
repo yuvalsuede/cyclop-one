@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+build/
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/
+xcuserdata/
+
+# Keep project.yml (XcodeGen source of truth)
+# Do NOT ignore *.xcodeproj — XcodeGen regenerates it
+
+# SwiftPM
+.build/
+Package.resolved
+
+# Profiling
+*.profraw
+*.profdata
+
+# Babysitter internal
+.a5c/
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Logs
+*.log
+
+# Archives
+*.xcarchive

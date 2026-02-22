@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Cyclop One</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Cyclop One needs screen capture access to see your desktop and help you with tasks.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Cyclop One needs automation access to control applications on your behalf.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Cyclop One uses speech recognition to transcribe your voice commands locally on-device.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Cyclop One needs microphone access for push-to-talk voice input.</string>
+</dict>
+</plist>
