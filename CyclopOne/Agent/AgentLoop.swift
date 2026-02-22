@@ -764,15 +764,18 @@ actor AgentLoop {
     /// Older screenshots are replaced with `[screenshot removed]`.
     func pruneConversationHistory() {
         // Enforce max conversation message count to prevent unbounded growth.
-        // Keep the first message (initial user prompt) and the most recent messages.
+        // Keep only the first message (initial user prompt) and the most recent messages.
         //
-        // CRITICAL: After removing messages, we must also remove any orphaned
-        // tool_result blocks whose tool_use_id no longer matches a tool_use in
-        // the remaining history. The Claude API rejects orphaned tool_results.
+        // CRITICAL: After removing messages, we must clean up BOTH:
+        // 1. Orphaned tool_result blocks (tool_use was evicted, tool_result remains)
+        // 2. Orphaned tool_use blocks (tool_result was evicted, tool_use remains)
+        // The Claude API rejects both cases.
         if conversationHistory.count > maxConversationMessages {
             let excess = conversationHistory.count - maxConversationMessages
-            // Preserve first 2 messages (initial user prompt + first assistant response)
-            let preserveCount = min(2, conversationHistory.count)
+            // Only preserve message[0] (initial user prompt).
+            // Do NOT preserve message[1] — if it's an assistant message with tool_use,
+            // evicting message[2] (tool_result) creates an invalid conversation.
+            let preserveCount = 1
             let maxRemovable = max(0, conversationHistory.count - preserveCount - 1)
             let toRemove = min(excess, maxRemovable)
             if toRemove > 0 {
@@ -782,9 +785,9 @@ actor AgentLoop {
             }
         }
 
-        // Always clean up orphaned tool_result blocks — not just after eviction.
-        // Orphans can arise from API errors, partial responses, or other edge cases.
+        // Always clean up orphans in BOTH directions.
         removeOrphanedToolResults()
+        removeOrphanedToolUses()
 
         // Always prune — even early iterations benefit from smaller payloads
 
@@ -874,6 +877,54 @@ actor AgentLoop {
 
         if !indicesToRemove.isEmpty {
             NSLog("CyclopOne [AgentLoop]: Removed %d orphaned tool_result messages", indicesToRemove.count)
+        }
+    }
+
+    /// Remove assistant messages that contain tool_use blocks without matching
+    /// tool_result blocks in the subsequent conversation. The Claude API requires
+    /// every tool_use to be followed by a corresponding tool_result.
+    private func removeOrphanedToolUses() {
+        // Collect all tool_result IDs from user messages
+        var validToolResultIDs = Set<String>()
+        for message in conversationHistory {
+            guard let role = message["role"] as? String, role == "user" else { continue }
+            guard let content = message["content"] as? [[String: Any]] else { continue }
+            for block in content {
+                if let type = block["type"] as? String, type == "tool_result",
+                   let toolUseId = block["tool_use_id"] as? String {
+                    validToolResultIDs.insert(toolUseId)
+                }
+            }
+        }
+
+        // Find assistant messages with orphaned tool_use blocks
+        var indicesToRemove: [Int] = []
+        for (i, message) in conversationHistory.enumerated() {
+            guard let role = message["role"] as? String, role == "assistant" else { continue }
+            guard let content = message["content"] as? [[String: Any]] else { continue }
+
+            let toolUseBlocks = content.filter { ($0["type"] as? String) == "tool_use" }
+            guard !toolUseBlocks.isEmpty else { continue }
+
+            // Check if ALL tool_use blocks in this message have matching tool_results
+            let hasOrphanedToolUse = toolUseBlocks.contains { block in
+                let id = block["id"] as? String ?? ""
+                return !validToolResultIDs.contains(id)
+            }
+
+            if hasOrphanedToolUse {
+                // Remove the entire assistant message — partial tool_use removal
+                // is complex and the API requires all tool_uses to have results.
+                indicesToRemove.append(i)
+            }
+        }
+
+        for i in indicesToRemove.reversed() {
+            conversationHistory.remove(at: i)
+        }
+
+        if !indicesToRemove.isEmpty {
+            NSLog("CyclopOne [AgentLoop]: Removed %d assistant messages with orphaned tool_use blocks", indicesToRemove.count)
         }
     }
 
