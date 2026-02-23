@@ -152,9 +152,73 @@ class AccessibilityService {
         }
     }
 
+    // MARK: - Pasteboard Typing Helper
+
+    /// Returns true if a character is simple ASCII typable via CGEvent keyboardSetUnicodeString.
+    /// Simple ASCII: printable range 0x20-0x7E (space through tilde).
+    private func isSimpleASCII(_ char: Character) -> Bool {
+        guard let scalar = char.unicodeScalars.first,
+              char.unicodeScalars.count == 1 else {
+            return false // multi-scalar (emoji, combining chars) -> not simple
+        }
+        return scalar.value >= 0x20 && scalar.value <= 0x7E
+    }
+
+    /// Type text via NSPasteboard + Cmd+V. Used as fallback for non-ASCII and complex characters.
+    /// Saves and restores the previous pasteboard content to avoid clobbering the user's clipboard.
+    private func typeViaPasteboard(_ text: String) async -> ActionResult {
+        let pasteboard = NSPasteboard.general
+
+        // Save previous pasteboard content
+        let previousContents = pasteboard.string(forType: .string)
+        let previousChangeCount = pasteboard.changeCount
+
+        // Set our text on the pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        // Small delay to ensure pasteboard is ready
+        try? await Task.sleep(nanoseconds: 30_000_000) // 30ms
+
+        // Cmd+V to paste
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true),  // 0x09 = 'v'
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false) else {
+            NSLog("CyclopOne [AccessibilityService]: ❌ typeViaPasteboard — CGEvent creation failed for Cmd+V")
+            // Restore pasteboard before returning
+            if let prev = previousContents {
+                pasteboard.clearContents()
+                pasteboard.setString(prev, forType: .string)
+            }
+            return .failed("CGEvent creation failed for pasteboard paste")
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+
+        keyDown.post(tap: .cghidEventTap)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        keyUp.post(tap: .cghidEventTap)
+
+        // Wait for paste to complete before restoring pasteboard
+        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+        // Restore previous pasteboard content if it hasn't been changed by something else
+        if pasteboard.changeCount != previousChangeCount + 1 {
+            // Something else modified the pasteboard — don't restore
+            NSLog("CyclopOne [AccessibilityService]: pasteboard was modified externally, skipping restore")
+        } else if let prev = previousContents {
+            pasteboard.clearContents()
+            pasteboard.setString(prev, forType: .string)
+        }
+
+        NSLog("CyclopOne [AccessibilityService]: ✓ typeViaPasteboard — %d chars pasted", text.count)
+        return .ok
+    }
+
     /// Click a UI element at the given screen coordinates.
+    /// CGEvent posting is thread-safe; async sleep yields the main thread.
     @discardableResult
-    func clickAt(x: Double, y: Double) -> ActionResult {
+    func clickAt(x: Double, y: Double) async -> ActionResult {
         preflightWarn("clickAt(\(Int(x)),\(Int(y)))")
         let point = CGPoint(x: x, y: y)
 
@@ -165,7 +229,7 @@ class AccessibilityService {
         }
 
         mouseDown.post(tap: .cghidEventTap)
-        usleep(50_000) // 50ms delay
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms — yields main thread
         mouseUp.post(tap: .cghidEventTap)
         NSLog("CyclopOne [AccessibilityService]: ✓ clickAt(%d,%d) posted", Int(x), Int(y))
         return .ok
@@ -173,7 +237,7 @@ class AccessibilityService {
 
     /// Double-click at the given screen coordinates.
     @discardableResult
-    func doubleClickAt(x: Double, y: Double) -> ActionResult {
+    func doubleClickAt(x: Double, y: Double) async -> ActionResult {
         preflightWarn("doubleClickAt(\(Int(x)),\(Int(y)))")
         let point = CGPoint(x: x, y: y)
 
@@ -190,7 +254,7 @@ class AccessibilityService {
 
         click1Down.post(tap: .cghidEventTap)
         click1Up.post(tap: .cghidEventTap)
-        usleep(50_000)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         click2Down.post(tap: .cghidEventTap)
         click2Up.post(tap: .cghidEventTap)
         NSLog("CyclopOne [AccessibilityService]: ✓ doubleClickAt(%d,%d) posted", Int(x), Int(y))
@@ -198,8 +262,10 @@ class AccessibilityService {
     }
 
     /// Type a string of text using keyboard events.
+    /// Simple ASCII characters (0x20-0x7E) are typed via CGEvent with keyboardSetUnicodeString.
+    /// Non-ASCII, emoji, accented, and special characters fall back to NSPasteboard + Cmd+V.
     @discardableResult
-    func typeText(_ text: String) -> ActionResult {
+    func typeText(_ text: String) async -> ActionResult {
         preflightWarn("typeText(\(text.prefix(30)))")
 
         // Test that CGEvent creation works with a single probe event
@@ -208,14 +274,52 @@ class AccessibilityService {
             return .failed("CGEvent creation failed for typing — accessibility permission may not be fully active.")
         }
 
+        // Split text into runs of simple ASCII vs. non-ASCII for efficient handling.
+        // Simple ASCII chars are typed one-by-one via CGEvent; non-ASCII runs use pasteboard.
+        var currentASCIIRun = ""
         var charsTyped = 0
-        for character in text {
-            let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
-            let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
 
-            guard let keyDown = keyDown, let keyUp = keyUp else {
-                NSLog("CyclopOne [AccessibilityService]: ❌ typeText — CGEvent nil at char %d", charsTyped)
-                return .failed("CGEvent creation failed at character \(charsTyped)")
+        for character in text {
+            if isSimpleASCII(character) {
+                currentASCIIRun.append(character)
+            } else {
+                // Flush any pending ASCII run first
+                if !currentASCIIRun.isEmpty {
+                    let result = await typeASCIIRun(currentASCIIRun, startIndex: charsTyped)
+                    if !result.success { return result }
+                    charsTyped += currentASCIIRun.count
+                    currentASCIIRun = ""
+                }
+                // Type this non-ASCII character via pasteboard
+                let result = await typeViaPasteboard(String(character))
+                if !result.success {
+                    NSLog("CyclopOne [AccessibilityService]: ❌ typeText — pasteboard fallback failed at char %d ('%@')",
+                          charsTyped, String(character))
+                    return .failed("Pasteboard typing failed at character \(charsTyped)")
+                }
+                charsTyped += 1
+            }
+        }
+
+        // Flush remaining ASCII run
+        if !currentASCIIRun.isEmpty {
+            let result = await typeASCIIRun(currentASCIIRun, startIndex: charsTyped)
+            if !result.success { return result }
+            charsTyped += currentASCIIRun.count
+        }
+
+        NSLog("CyclopOne [AccessibilityService]: ✓ typeText — %d chars posted", charsTyped)
+        return .ok
+    }
+
+    /// Type a run of simple ASCII characters via CGEvent keyboardSetUnicodeString.
+    private func typeASCIIRun(_ run: String, startIndex: Int) async -> ActionResult {
+        var idx = startIndex
+        for character in run {
+            guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+                NSLog("CyclopOne [AccessibilityService]: ❌ typeASCIIRun — CGEvent nil at char %d", idx)
+                return .failed("CGEvent creation failed at character \(idx)")
             }
 
             var unicodeChar = Array(String(character).utf16)
@@ -224,16 +328,15 @@ class AccessibilityService {
 
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
-            usleep(10_000) // 10ms between keystrokes
-            charsTyped += 1
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms between keystrokes — yields main thread
+            idx += 1
         }
-        NSLog("CyclopOne [AccessibilityService]: ✓ typeText — %d chars posted", charsTyped)
         return .ok
     }
 
     /// Press a keyboard shortcut (e.g., Command+S).
     @discardableResult
-    func pressShortcut(keyCode: CGKeyCode, modifiers: CGEventFlags) -> ActionResult {
+    func pressShortcut(keyCode: CGKeyCode, modifiers: CGEventFlags) async -> ActionResult {
         preflightWarn("pressShortcut(key=\(keyCode))")
 
         guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
@@ -246,7 +349,7 @@ class AccessibilityService {
         keyUp.flags = modifiers
 
         keyDown.post(tap: .cghidEventTap)
-        usleep(50_000)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         keyUp.post(tap: .cghidEventTap)
         NSLog("CyclopOne [AccessibilityService]: ✓ pressShortcut(key=%d) posted", keyCode)
         return .ok
@@ -254,7 +357,7 @@ class AccessibilityService {
 
     /// Right-click at the given screen coordinates.
     @discardableResult
-    func rightClickAt(x: Double, y: Double) -> ActionResult {
+    func rightClickAt(x: Double, y: Double) async -> ActionResult {
         preflightWarn("rightClickAt(\(Int(x)),\(Int(y)))")
         let point = CGPoint(x: x, y: y)
 
@@ -265,7 +368,7 @@ class AccessibilityService {
         }
 
         mouseDown.post(tap: .cghidEventTap)
-        usleep(50_000)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         mouseUp.post(tap: .cghidEventTap)
         NSLog("CyclopOne [AccessibilityService]: ✓ rightClickAt(%d,%d) posted", Int(x), Int(y))
         return .ok
@@ -273,7 +376,7 @@ class AccessibilityService {
 
     /// Drag from one point to another.
     @discardableResult
-    func drag(fromX: Double, fromY: Double, toX: Double, toY: Double) -> ActionResult {
+    func drag(fromX: Double, fromY: Double, toX: Double, toY: Double) async -> ActionResult {
         preflightWarn("drag")
         let from = CGPoint(x: fromX, y: fromY)
         let to = CGPoint(x: toX, y: toY)
@@ -286,9 +389,9 @@ class AccessibilityService {
         }
 
         move.post(tap: .cghidEventTap)
-        usleep(50_000)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         down.post(tap: .cghidEventTap)
-        usleep(50_000)
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
 
         let steps = 10
         for i in 1...steps {
@@ -299,7 +402,7 @@ class AccessibilityService {
             if let drag = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: mid, mouseButton: .left) {
                 drag.post(tap: .cghidEventTap)
             }
-            usleep(20_000)
+            try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
         }
 
         up.post(tap: .cghidEventTap)
@@ -309,7 +412,7 @@ class AccessibilityService {
 
     /// Scroll at the given coordinates.
     @discardableResult
-    func scroll(x: Double, y: Double, deltaY: Int) -> ActionResult {
+    func scroll(x: Double, y: Double, deltaY: Int) async -> ActionResult {
         preflightWarn("scroll")
         let point = CGPoint(x: x, y: y)
         guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
@@ -317,7 +420,7 @@ class AccessibilityService {
             return .failed("CGEvent creation failed for scroll move")
         }
         move.post(tap: .cghidEventTap)
-        usleep(30_000)
+        try? await Task.sleep(nanoseconds: 30_000_000) // 30ms
 
         guard let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: Int32(deltaY), wheel2: 0, wheel3: 0) else {
             NSLog("CyclopOne [AccessibilityService]: ❌ scroll — CGEvent scroll returned nil")
@@ -332,6 +435,7 @@ class AccessibilityService {
     @discardableResult
     func moveMouse(x: Double, y: Double) -> ActionResult {
         // moveMouse doesn't need full preflight — it's a positioning helper
+        // No sleep needed, so stays synchronous
         let point = CGPoint(x: x, y: y)
         guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
             NSLog("CyclopOne [AccessibilityService]: ❌ moveMouse — CGEvent returned nil")
@@ -339,6 +443,109 @@ class AccessibilityService {
         }
         moveEvent.post(tap: .cghidEventTap)
         return .ok
+    }
+
+    // MARK: - M5: Safety Gate Context Methods
+
+    /// Get the focused element's role and label for the target app.
+    func getFocusedElementInfo(targetPID: pid_t?) -> (role: String, label: String)? {
+        guard let pid = targetPID else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success else {
+            return nil
+        }
+        let focused = focusedRef as! AXUIElement
+
+        let role = getStringAttribute(focused, kAXRoleAttribute as CFString) ?? "unknown"
+        let label = getStringAttribute(focused, kAXDescriptionAttribute as CFString)
+            ?? getStringAttribute(focused, kAXTitleAttribute as CFString)
+            ?? getStringAttribute(focused, kAXLabelValueAttribute as CFString)
+            ?? ""
+
+        return (role: role, label: label)
+    }
+
+    /// Get the title of the frontmost window for the target app.
+    func getWindowTitle(targetPID: pid_t?) -> String? {
+        guard let pid = targetPID else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        // Try the focused window first
+        var windowRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success {
+            let window = windowRef as! AXUIElement
+            if let title = getStringAttribute(window, kAXTitleAttribute as CFString) {
+                return title
+            }
+        }
+
+        // Fallback: first window in the windows list
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement],
+           let firstWindow = windows.first {
+            return getStringAttribute(firstWindow, kAXTitleAttribute as CFString)
+        }
+
+        return nil
+    }
+
+    /// Get the URL from the browser's address bar.
+    func getBrowserURL(targetPID: pid_t?) -> String? {
+        guard let pid = targetPID else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        // Try to find the address bar by searching for a text field with URL-like content.
+        // Different browsers expose this differently. We search the focused window's
+        // children for a text field whose value looks like a URL.
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success else {
+            return nil
+        }
+        let window = windowRef as! AXUIElement
+
+        return findURLInElement(window, depth: 0, maxDepth: 6)
+    }
+
+    /// Recursively search for a text field containing a URL in the AX tree.
+    private func findURLInElement(_ element: AXUIElement, depth: Int, maxDepth: Int) -> String? {
+        guard depth <= maxDepth else { return nil }
+
+        let role = getStringAttribute(element, kAXRoleAttribute as CFString)
+
+        // Look for text fields (address bars) or combo boxes (Safari address bar)
+        if role == "AXTextField" || role == "AXComboBox" {
+            if let value = getStringAttribute(element, kAXValueAttribute as CFString) {
+                // Check if the value looks like a URL
+                if value.contains("://") || value.contains(".com") || value.contains(".org")
+                    || value.contains(".net") || value.contains("www.") || value.contains("localhost") {
+                    return value
+                }
+            }
+        }
+
+        // Also check the description for "address" or "url" hints
+        let desc = (getStringAttribute(element, kAXDescriptionAttribute as CFString) ?? "").lowercased()
+        if desc.contains("address") || desc.contains("url") || desc.contains("location") {
+            if let value = getStringAttribute(element, kAXValueAttribute as CFString) {
+                return value
+            }
+        }
+
+        // Recurse into children
+        var childrenRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+           let childArray = childrenRef as? [AXUIElement] {
+            for child in childArray.prefix(20) {
+                if let url = findURLInElement(child, depth: depth + 1, maxDepth: maxDepth) {
+                    return url
+                }
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Password Field Detection (Sprint 17)

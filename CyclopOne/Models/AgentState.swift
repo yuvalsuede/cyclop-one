@@ -34,7 +34,7 @@ enum AgentState: Equatable {
 
 /// Configuration for the agent's behavior.
 struct AgentConfig {
-    var maxIterations: Int = 20
+    var maxIterations: Int = 15
     var toolTimeout: TimeInterval = 30
     var shellTimeout: TimeInterval = 60
     /// Max pixel dimension for screenshot scaling. 1280 balances text readability
@@ -45,8 +45,12 @@ struct AgentConfig {
     var confirmDestructiveActions: Bool = true
     var modelName: String = {
         let saved = UserDefaults.standard.string(forKey: "selectedModel")
-        return (saved?.isEmpty == false) ? saved! : "claude-sonnet-4-6"
+        return (saved?.isEmpty == false) ? saved! : "claude-haiku-4-5-20251001"
     }()
+
+    /// The "brain" model used when the agent is stuck or needs higher reasoning.
+    var brainModel: String = "claude-opus-4-6"
+
     var permissionMode: PermissionMode = .standard
 
     /// Click down/up delay in microseconds. Default 150ms (GFX-H2 fix: was 50ms).
@@ -58,17 +62,4 @@ struct AgentConfig {
     /// Drag dwell time per step in microseconds.
     var dragDwellMicroseconds: useconds_t = 20_000
 
-    /// Legacy destructive patterns — kept for backward compatibility.
-    /// The PermissionClassifier is the preferred approach.
-    var destructivePatterns: [String] = [
-        "rm ", "rm -", "rmdir", "delete", "trash",
-        "sudo", "format", "mkfs", "dd if=",
-        "DROP ", "DELETE FROM", "TRUNCATE",
-        "shutdown", "reboot", "kill -9"
-    ]
-
-    func isDestructive(_ command: String) -> Bool {
-        let lower = command.lowercased()
-        return destructivePatterns.contains { lower.contains($0.lowercased()) }
-    }
 }

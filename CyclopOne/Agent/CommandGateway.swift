@@ -25,6 +25,7 @@ enum CommandSource: String, Sendable {
     case localUI
     case hotkey
     case openClaw
+    case telegram
 }
 
 // MARK: - Command
@@ -90,6 +91,20 @@ actor CommandGateway {
     private func executeCommand(_ command: Command) async {
         isBusy = true
 
+        let isExternal = command.source == .telegram || command.source == .openClaw
+
+        // M3: Create observer based on command source
+        let observer: (any AgentObserver)?
+        if command.source == .telegram,
+           let telegramChannel = command.replyChannel as? TelegramReplyChannel {
+            observer = TelegramAgentObserver(
+                service: TelegramService.shared,
+                chatID: telegramChannel.chatID
+            )
+        } else {
+            observer = nil  // Local UI gets feedback through onMessage/onStateChange
+        }
+
         let result = await orchestrator.startRun(
             command: command.text,
             source: command.source.rawValue,
@@ -97,22 +112,17 @@ actor CommandGateway {
             replyChannel: command.replyChannel,
             onStateChange: { _ in },
             onMessage: { message in
-                Task {
-                    await command.replyChannel.sendText(message.content)
+                // Only send messages to local UI, not to Telegram/OpenClaw
+                if !isExternal {
+                    Task {
+                        await command.replyChannel.sendText(message.content)
+                    }
                 }
             },
             onConfirmationNeeded: { prompt in
                 await command.replyChannel.requestApproval(prompt)
             },
-            onProgress: { iteration, action in
-                // Send progress updates every 3 iterations to avoid flooding
-                if iteration % 3 == 0 || iteration == 1 {
-                    let update = "Iteration \(iteration): \(action)"
-                    Task {
-                        await command.replyChannel.sendText(update)
-                    }
-                }
-            }
+            observer: observer
         )
 
         // Ensure panel is restored after the run
@@ -120,14 +130,11 @@ actor CommandGateway {
 
         isBusy = false
 
-        // Send the run result through the reply channel
-        let statusLabel = result.success ? "Complete" : "Failed"
-        let formattedResult = "Task \(statusLabel) — \(result.iterations) iterations, \(result.summary)"
-        await command.replyChannel.sendText(formattedResult)
-
-        // Send final screenshot if available
-        if let screenshotData = await captureFinaleScreenshot() {
-            await command.replyChannel.sendScreenshot(screenshotData)
+        // Send result — skip for chat-only responses (already sent by Orchestrator)
+        if result.iterations > 0 {
+            let statusLabel = result.success ? "Done" : "Failed"
+            let formattedResult = "\(statusLabel) — \(result.iterations) iterations, \(result.summary)"
+            await command.replyChannel.sendText(formattedResult)
         }
     }
 
@@ -172,11 +179,16 @@ actor CommandGateway {
         )
     }
 
-    /// Cancel the currently running command by requesting cooperative cancellation
-    /// on both the Orchestrator and the AgentLoop.
+    /// Cancel the currently running command using hard cancel.
+    /// Calls the Orchestrator's hard cancel (which cancels the Swift Task)
+    /// AND sets the cooperative flag on AgentLoop for defense in depth.
     func cancelCurrentRun() async {
         guard isBusy else { return }
-        await orchestrator.cancel()
+
+        // M6: Use Orchestrator's hard cancel (Task.cancel() + watchdog)
+        await orchestrator.cancelCurrentRun()
+
+        // Also set the cooperative flag on AgentLoop for defense in depth
         await agentLoop.cancel()
     }
 }

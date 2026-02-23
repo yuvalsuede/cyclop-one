@@ -1,0 +1,580 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		M3F1E2D3C4B5A60718293A4B /* AgentObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = M3A0B1C2D3E4F5061728394A /* AgentObserver.swift */; };
+		M3F2E3D4C5B6A70819304A5C /* LocalAgentObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = M3B1C2D3E4F506172839405B /* LocalAgentObserver.swift */; };
+		M3F3E4D5C6B7A80920415B6D /* TelegramAgentObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = M3C1D2E3F4051627384950AC /* TelegramAgentObserver.swift */; };
+		M5A1B2C3D4E5F60718293A4B /* ActionSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = M5B1C2D3E4F506172839405C /* ActionSafetyGate.swift */; };
+		0B8BDE698102239ED6EBF5BB /* ActionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B129D4481354582A28176AFA /* ActionExecutor.swift */; };
+		1020385409150152C6E02F8E /* OpenClawBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E25D8AE4BA047ED66395120 /* OpenClawBridge.swift */; };
+		12C403D05A0924057D2DB61F /* PluginLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF123CF4DE3CA3E0AA8FD8E /* PluginLoader.swift */; };
+		37C6A96F819BE4E212D1D201 /* VerificationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFBBE315EDCB3DEEDB896A70 /* VerificationEngine.swift */; };
+		3C7C1AABC5D8CEAC39242108 /* ToolDefinitions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C43A719EA92D1865AF31B6 /* ToolDefinitions.swift */; };
+		3DA2712FDC5D3DBACAAF84E0 /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3C69D647488B1DBCB984C24 /* Message.swift */; };
+		453517974ED599314B95D0CE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4A767AFD3DD50003A4D685C /* AppDelegate.swift */; };
+		4B80CD3FEDEA1BFF99F7DFF8 /* AgentState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AED629787BDD32B4EB8B42B8 /* AgentState.swift */; };
+		59EDDB139BA8FB2D0E714740 /* CyclopOneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91D6870414C5694E72474C7B /* CyclopOneApp.swift */; };
+		608A6DFD63E5FD3BD3D80941 /* PermissionClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB88D5BD335C7D2049AAEA97 /* PermissionClassifier.swift */; };
+		6460C8BC8BC041BCE25E2517 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE0148BE6BDB78D6E127EA4 /* OnboardingView.swift */; };
+		674C399790D5C2C0BF65F01D /* ScreenCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E589DDF5BA30A89357D3906 /* ScreenCaptureService.swift */; };
+		6BB710BEA6D8904B20ECC09B /* CyclopOneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B0826FE73B3CC51624CDADA /* CyclopOneTests.swift */; };
+		6BDE6B632EE26EC412195B14 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09EAD56E980A8D2916ADF815 /* KeychainService.swift */; };
+		764DCBF03CFECACB61FA81E6 /* AgentLoop.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E9498DDB5E1D37DC591AED /* AgentLoop.swift */; };
+		8F5C89FEEE4BB39836727D13 /* ClaudeAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1BDF74A73AD4A348225477D /* ClaudeAPIService.swift */; };
+		92AC36A06935C5EB1CF1FDFD /* FloatingDot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98EB614E4D1699A2A81B8272 /* FloatingDot.swift */; };
+		95F6312E2CED42D7A76C6F31 /* MemoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB611A112FF63C22EF98F632 /* MemoryService.swift */; };
+		9CB5272A5F23F425267D797C /* AccessibilityService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0FF4B8021189C08B7AE55B9 /* AccessibilityService.swift */; };
+		A0FA0FF14A352A232C872AB1 /* Orchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A963DA6C75D26D705601E5FD /* Orchestrator.swift */; };
+		A306A7B84708557E8A81D271 /* TelegramService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E2F1400AA3E26BB6E86DCAE /* TelegramService.swift */; };
+		AAFB673B0427B40F87B1C42C /* CommandGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE3708BCAC14C2B1E3C7A28E /* CommandGateway.swift */; };
+		AEB6568B3620B3B234FD8A78 /* RetryStrategy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CD789A31BE8CE1771C570ED /* RetryStrategy.swift */; };
+		AF55881BEBBC85CD631E3DDB /* CircuitBreaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1321B29E47E0283AD8FC3B74 /* CircuitBreaker.swift */; };
+		B2A4C6D8E0F2143658791A2B /* ExecutionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3B5D7E9F1032547698A1B2C /* ExecutionPlan.swift */; };
+		B2D4E1A93F7C8D5E1A2B3C4D /* IntentClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3E5F2BA4A8D9E6F2B3C4D5E /* IntentClassifier.swift */; };
+		C1E3D54106636B60554EF17F /* RunJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B71C93BE2F2C48046A3A4D8 /* RunJournal.swift */; };
+		CAE43B787AC487DFF0DD27FD /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F75B429E9D1F6F6C5740514 /* SettingsView.swift */; };
+		E1F28D5F7D60491654F45000 /* DotStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13ACF735DEBCEA852B29732 /* DotStatusView.swift */; };
+		EFE6EE8CA11461A8648A3C6B /* SkillLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E5C06904141010EA58E2668 /* SkillLoader.swift */; };
+		F64C27D0E8A84B75748F13F7 /* AgentCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 147E3F96B04346AF5330D0AD /* AgentCoordinator.swift */; };
+		AA1B2C3D4E5F60718293A4B5 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = BB2C3D4E5F607182934A5B6C /* AppIcon.icns */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9F747AE455E7789963A3F968 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 669B91DEA2AF578891DFF6F7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A5C8E0AD8DAFF4A41C0EA45C;
+			remoteInfo = CyclopOne;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		M3A0B1C2D3E4F5061728394A /* AgentObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentObserver.swift; sourceTree = "<group>"; };
+		M3B1C2D3E4F506172839405B /* LocalAgentObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAgentObserver.swift; sourceTree = "<group>"; };
+		M3C1D2E3F4051627384950AC /* TelegramAgentObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelegramAgentObserver.swift; sourceTree = "<group>"; };
+		000F0F029810A5E31DA8391E /* CyclopOneTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CyclopOneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		01C43A719EA92D1865AF31B6 /* ToolDefinitions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolDefinitions.swift; sourceTree = "<group>"; };
+		05C7008792AD118497C9F437 /* CyclopOne.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CyclopOne.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		09EAD56E980A8D2916ADF815 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		1321B29E47E0283AD8FC3B74 /* CircuitBreaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircuitBreaker.swift; sourceTree = "<group>"; };
+		D3E5F2BA4A8D9E6F2B3C4D5E /* IntentClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentClassifier.swift; sourceTree = "<group>"; };
+		M5B1C2D3E4F506172839405C /* ActionSafetyGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionSafetyGate.swift; sourceTree = "<group>"; };
+		147E3F96B04346AF5330D0AD /* AgentCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCoordinator.swift; sourceTree = "<group>"; };
+		1F75B429E9D1F6F6C5740514 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		2492A6E70534C4D2690E3917 /* CyclopOne.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CyclopOne.entitlements; sourceTree = "<group>"; };
+		2A556B1A7398914C9454E2A5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		3B0826FE73B3CC51624CDADA /* CyclopOneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CyclopOneTests.swift; sourceTree = "<group>"; };
+		3E589DDF5BA30A89357D3906 /* ScreenCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureService.swift; sourceTree = "<group>"; };
+		4CD789A31BE8CE1771C570ED /* RetryStrategy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetryStrategy.swift; sourceTree = "<group>"; };
+		5E25D8AE4BA047ED66395120 /* OpenClawBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenClawBridge.swift; sourceTree = "<group>"; };
+		6B71C93BE2F2C48046A3A4D8 /* RunJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunJournal.swift; sourceTree = "<group>"; };
+		6E5C06904141010EA58E2668 /* SkillLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillLoader.swift; sourceTree = "<group>"; };
+		7E2F1400AA3E26BB6E86DCAE /* TelegramService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelegramService.swift; sourceTree = "<group>"; };
+		91D6870414C5694E72474C7B /* CyclopOneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CyclopOneApp.swift; sourceTree = "<group>"; };
+		98EB614E4D1699A2A81B8272 /* FloatingDot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingDot.swift; sourceTree = "<group>"; };
+		9EF123CF4DE3CA3E0AA8FD8E /* PluginLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginLoader.swift; sourceTree = "<group>"; };
+		A1E9498DDB5E1D37DC591AED /* AgentLoop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLoop.swift; sourceTree = "<group>"; };
+		A3C69D647488B1DBCB984C24 /* Message.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Message.swift; sourceTree = "<group>"; };
+		A963DA6C75D26D705601E5FD /* Orchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Orchestrator.swift; sourceTree = "<group>"; };
+		AED629787BDD32B4EB8B42B8 /* AgentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentState.swift; sourceTree = "<group>"; };
+		B129D4481354582A28176AFA /* ActionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionExecutor.swift; sourceTree = "<group>"; };
+		C3B5D7E9F1032547698A1B2C /* ExecutionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionPlan.swift; sourceTree = "<group>"; };
+		BE3708BCAC14C2B1E3C7A28E /* CommandGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandGateway.swift; sourceTree = "<group>"; };
+		C13ACF735DEBCEA852B29732 /* DotStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DotStatusView.swift; sourceTree = "<group>"; };
+		CB611A112FF63C22EF98F632 /* MemoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryService.swift; sourceTree = "<group>"; };
+		D0FF4B8021189C08B7AE55B9 /* AccessibilityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityService.swift; sourceTree = "<group>"; };
+		DFBBE315EDCB3DEEDB896A70 /* VerificationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerificationEngine.swift; sourceTree = "<group>"; };
+		E1BDF74A73AD4A348225477D /* ClaudeAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAPIService.swift; sourceTree = "<group>"; };
+		EB88D5BD335C7D2049AAEA97 /* PermissionClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionClassifier.swift; sourceTree = "<group>"; };
+		F4A767AFD3DD50003A4D685C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		FCE0148BE6BDB78D6E127EA4 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		BB2C3D4E5F607182934A5B6C /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		2F8C2AF0C5AC12DD52DE9473 = {
+			isa = PBXGroup;
+			children = (
+				A0298A9F7F9D8E97F023D581 /* CyclopOne */,
+				82EA650B687BF08FE1121B91 /* CyclopOneTests */,
+				E2249DB95526302F94186C53 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4228A9265BE4614353AD615E /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				C13ACF735DEBCEA852B29732 /* DotStatusView.swift */,
+				98EB614E4D1699A2A81B8272 /* FloatingDot.swift */,
+				FCE0148BE6BDB78D6E127EA4 /* OnboardingView.swift */,
+				1F75B429E9D1F6F6C5740514 /* SettingsView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		5C0F0EE31E4A1CCAEAF414F4 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				AED629787BDD32B4EB8B42B8 /* AgentState.swift */,
+				C3B5D7E9F1032547698A1B2C /* ExecutionPlan.swift */,
+				A3C69D647488B1DBCB984C24 /* Message.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		69A1513F7588A917771F00E1 /* Agent */ = {
+			isa = PBXGroup;
+			children = (
+				M5B1C2D3E4F506172839405C /* ActionSafetyGate.swift */,
+				147E3F96B04346AF5330D0AD /* AgentCoordinator.swift */,
+				A1E9498DDB5E1D37DC591AED /* AgentLoop.swift */,
+				M3A0B1C2D3E4F5061728394A /* AgentObserver.swift */,
+				1321B29E47E0283AD8FC3B74 /* CircuitBreaker.swift */,
+				BE3708BCAC14C2B1E3C7A28E /* CommandGateway.swift */,
+				D3E5F2BA4A8D9E6F2B3C4D5E /* IntentClassifier.swift */,
+				M3B1C2D3E4F506172839405B /* LocalAgentObserver.swift */,
+				A963DA6C75D26D705601E5FD /* Orchestrator.swift */,
+				4CD789A31BE8CE1771C570ED /* RetryStrategy.swift */,
+				6B71C93BE2F2C48046A3A4D8 /* RunJournal.swift */,
+				01C43A719EA92D1865AF31B6 /* ToolDefinitions.swift */,
+				DFBBE315EDCB3DEEDB896A70 /* VerificationEngine.swift */,
+			);
+			path = Agent;
+			sourceTree = "<group>";
+		};
+		6C0D2633D40A4BDA9D506BBD /* App */ = {
+			isa = PBXGroup;
+			children = (
+				BB2C3D4E5F607182934A5B6C /* AppIcon.icns */,
+				F4A767AFD3DD50003A4D685C /* AppDelegate.swift */,
+				91D6870414C5694E72474C7B /* CyclopOneApp.swift */,
+				2A556B1A7398914C9454E2A5 /* Info.plist */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		82EA650B687BF08FE1121B91 /* CyclopOneTests */ = {
+			isa = PBXGroup;
+			children = (
+				3B0826FE73B3CC51624CDADA /* CyclopOneTests.swift */,
+			);
+			path = CyclopOneTests;
+			sourceTree = "<group>";
+		};
+		A0298A9F7F9D8E97F023D581 /* CyclopOne */ = {
+			isa = PBXGroup;
+			children = (
+				2492A6E70534C4D2690E3917 /* CyclopOne.entitlements */,
+				69A1513F7588A917771F00E1 /* Agent */,
+				6C0D2633D40A4BDA9D506BBD /* App */,
+				5C0F0EE31E4A1CCAEAF414F4 /* Models */,
+				AB6688829DBB773768C724FB /* Services */,
+				4228A9265BE4614353AD615E /* UI */,
+			);
+			path = CyclopOne;
+			sourceTree = "<group>";
+		};
+		AB6688829DBB773768C724FB /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				D0FF4B8021189C08B7AE55B9 /* AccessibilityService.swift */,
+				B129D4481354582A28176AFA /* ActionExecutor.swift */,
+				E1BDF74A73AD4A348225477D /* ClaudeAPIService.swift */,
+				09EAD56E980A8D2916ADF815 /* KeychainService.swift */,
+				CB611A112FF63C22EF98F632 /* MemoryService.swift */,
+				5E25D8AE4BA047ED66395120 /* OpenClawBridge.swift */,
+				EB88D5BD335C7D2049AAEA97 /* PermissionClassifier.swift */,
+				9EF123CF4DE3CA3E0AA8FD8E /* PluginLoader.swift */,
+				3E589DDF5BA30A89357D3906 /* ScreenCaptureService.swift */,
+				6E5C06904141010EA58E2668 /* SkillLoader.swift */,
+				M3C1D2E3F4051627384950AC /* TelegramAgentObserver.swift */,
+				7E2F1400AA3E26BB6E86DCAE /* TelegramService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		E2249DB95526302F94186C53 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				05C7008792AD118497C9F437 /* CyclopOne.app */,
+				000F0F029810A5E31DA8391E /* CyclopOneTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2187014B8C56831B2CBE2D53 /* CyclopOneTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5B9F410220EB26E442186679 /* Build configuration list for PBXNativeTarget "CyclopOneTests" */;
+			buildPhases = (
+				F0810C69B6313A0D20F19FC9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				954B58FC3D808B6D731FB207 /* PBXTargetDependency */,
+			);
+			name = CyclopOneTests;
+			packageProductDependencies = (
+			);
+			productName = CyclopOneTests;
+			productReference = 000F0F029810A5E31DA8391E /* CyclopOneTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A5C8E0AD8DAFF4A41C0EA45C /* CyclopOne */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2B00F946F5458A5F616401D7 /* Build configuration list for PBXNativeTarget "CyclopOne" */;
+			buildPhases = (
+				3171D31CF7310CFF771FC098 /* Sources */,
+				CC3D4E5F607182934A5B6C7D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CyclopOne;
+			packageProductDependencies = (
+			);
+			productName = CyclopOne;
+			productReference = 05C7008792AD118497C9F437 /* CyclopOne.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		669B91DEA2AF578891DFF6F7 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = E9DF475C1F49AA202DA66330 /* Build configuration list for PBXProject "CyclopOne" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 2F8C2AF0C5AC12DD52DE9473;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A5C8E0AD8DAFF4A41C0EA45C /* CyclopOne */,
+				2187014B8C56831B2CBE2D53 /* CyclopOneTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CC3D4E5F607182934A5B6C7D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA1B2C3D4E5F60718293A4B5 /* AppIcon.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3171D31CF7310CFF771FC098 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9CB5272A5F23F425267D797C /* AccessibilityService.swift in Sources */,
+				M5A1B2C3D4E5F60718293A4B /* ActionSafetyGate.swift in Sources */,
+				0B8BDE698102239ED6EBF5BB /* ActionExecutor.swift in Sources */,
+				F64C27D0E8A84B75748F13F7 /* AgentCoordinator.swift in Sources */,
+				764DCBF03CFECACB61FA81E6 /* AgentLoop.swift in Sources */,
+				M3F1E2D3C4B5A60718293A4B /* AgentObserver.swift in Sources */,
+				4B80CD3FEDEA1BFF99F7DFF8 /* AgentState.swift in Sources */,
+				453517974ED599314B95D0CE /* AppDelegate.swift in Sources */,
+				AF55881BEBBC85CD631E3DDB /* CircuitBreaker.swift in Sources */,
+				8F5C89FEEE4BB39836727D13 /* ClaudeAPIService.swift in Sources */,
+				AAFB673B0427B40F87B1C42C /* CommandGateway.swift in Sources */,
+				59EDDB139BA8FB2D0E714740 /* CyclopOneApp.swift in Sources */,
+				B2D4E1A93F7C8D5E1A2B3C4D /* IntentClassifier.swift in Sources */,
+				E1F28D5F7D60491654F45000 /* DotStatusView.swift in Sources */,
+				B2A4C6D8E0F2143658791A2B /* ExecutionPlan.swift in Sources */,
+				92AC36A06935C5EB1CF1FDFD /* FloatingDot.swift in Sources */,
+				6BDE6B632EE26EC412195B14 /* KeychainService.swift in Sources */,
+				M3F2E3D4C5B6A70819304A5C /* LocalAgentObserver.swift in Sources */,
+				95F6312E2CED42D7A76C6F31 /* MemoryService.swift in Sources */,
+				3DA2712FDC5D3DBACAAF84E0 /* Message.swift in Sources */,
+				6460C8BC8BC041BCE25E2517 /* OnboardingView.swift in Sources */,
+				1020385409150152C6E02F8E /* OpenClawBridge.swift in Sources */,
+				A0FA0FF14A352A232C872AB1 /* Orchestrator.swift in Sources */,
+				608A6DFD63E5FD3BD3D80941 /* PermissionClassifier.swift in Sources */,
+				12C403D05A0924057D2DB61F /* PluginLoader.swift in Sources */,
+				AEB6568B3620B3B234FD8A78 /* RetryStrategy.swift in Sources */,
+				C1E3D54106636B60554EF17F /* RunJournal.swift in Sources */,
+				674C399790D5C2C0BF65F01D /* ScreenCaptureService.swift in Sources */,
+				CAE43B787AC487DFF0DD27FD /* SettingsView.swift in Sources */,
+				EFE6EE8CA11461A8648A3C6B /* SkillLoader.swift in Sources */,
+				M3F3E4D5C6B7A80920415B6D /* TelegramAgentObserver.swift in Sources */,
+				A306A7B84708557E8A81D271 /* TelegramService.swift in Sources */,
+				3C7C1AABC5D8CEAC39242108 /* ToolDefinitions.swift in Sources */,
+				37C6A96F819BE4E212D1D201 /* VerificationEngine.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F0810C69B6313A0D20F19FC9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6BB710BEA6D8904B20ECC09B /* CyclopOneTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		954B58FC3D808B6D731FB207 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A5C8E0AD8DAFF4A41C0EA45C /* CyclopOne */;
+			targetProxy = 9F747AE455E7789963A3F968 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		4017150EFEDC341B7A246D94 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cyclop.one.tests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cyclop One.app/Contents/MacOS/Cyclop One";
+			};
+			name = Debug;
+		};
+		5919240B69315FE79ADAED7F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		98D89E2F1E16F61AF4CF1414 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		9AEFD660E715F6C3542B8DAF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = CyclopOne/CyclopOne.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				INFOPLIST_FILE = CyclopOne/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cyclop.one.app;
+				PRODUCT_NAME = "Cyclop One";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		ABBAB4631A3C400B66A627F6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cyclop.one.tests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cyclop One.app/Contents/MacOS/Cyclop One";
+			};
+			name = Release;
+		};
+		CE285376B92BB2ED2C504014 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = CyclopOne/CyclopOne.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				INFOPLIST_FILE = CyclopOne/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cyclop.one.app;
+				PRODUCT_NAME = "Cyclop One";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2B00F946F5458A5F616401D7 /* Build configuration list for PBXNativeTarget "CyclopOne" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9AEFD660E715F6C3542B8DAF /* Debug */,
+				CE285376B92BB2ED2C504014 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5B9F410220EB26E442186679 /* Build configuration list for PBXNativeTarget "CyclopOneTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4017150EFEDC341B7A246D94 /* Debug */,
+				ABBAB4631A3C400B66A627F6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E9DF475C1F49AA202DA66330 /* Build configuration list for PBXProject "CyclopOne" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				98D89E2F1E16F61AF4CF1414 /* Debug */,
+				5919240B69315FE79ADAED7F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 669B91DEA2AF578891DFF6F7 /* Project object */;
+}

@@ -112,19 +112,35 @@ actor SkillLoader {
             }
         }
 
-        self.skills = loaded
-
-        // Pre-compile all trigger regexes
+        // Pre-compile all trigger regexes with proper error handling
         compiledTriggers.removeAll()
-        for skill in loaded {
-            for pattern in skill.triggers {
+        for i in loaded.indices {
+            var hasInvalidTrigger = false
+            for pattern in loaded[i].triggers {
                 if compiledTriggers[pattern] == nil {
-                    compiledTriggers[pattern] = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+                    do {
+                        compiledTriggers[pattern] = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+                    } catch {
+                        hasInvalidTrigger = true
+                        logger.error("Failed to compile trigger regex for skill '\(loaded[i].name)': pattern='\(pattern)' error=\(error.localizedDescription)")
+                        NSLog("CyclopOne [SkillLoader]: Invalid regex in skill '%@': pattern='%@' — %@", loaded[i].name, pattern, error.localizedDescription)
+                    }
                 }
+            }
+            // Disable skill if any trigger regex failed to compile
+            if hasInvalidTrigger {
+                loaded[i].isEnabled = false
+                logger.warning("Disabled skill '\(loaded[i].name)' due to invalid trigger regex")
+                NSLog("CyclopOne [SkillLoader]: Disabled skill '%@' due to invalid trigger regex", loaded[i].name)
             }
         }
 
+        self.skills = loaded
+
         logger.info("Loaded \(loaded.count) skills (\(loaded.filter { $0.isBuiltIn }.count) built-in, \(loaded.filter { !$0.isBuiltIn }.count) user)")
+
+        // Run full trigger validation and report any issues
+        validateSkillTriggers()
     }
 
     /// Reload skills from disk (e.g. after a new skill is authored).
@@ -281,6 +297,16 @@ actor SkillLoader {
         \(suggestion.maxIterations)
         """
 
+        // Validate all regex patterns before writing to disk
+        let validationErrors = validateSkillFile(content)
+        if !validationErrors.isEmpty {
+            for err in validationErrors {
+                logger.error("Skill validation failed: \(err)")
+            }
+            NSLog("CyclopOne [SkillLoader]: Refusing to write skill '%@' — %d validation error(s)", suggestion.name, validationErrors.count)
+            return nil
+        }
+
         do {
             try content.write(to: filePath, atomically: true, encoding: .utf8)
             logger.info("Wrote skill file: \(filePath.path)")
@@ -336,7 +362,7 @@ actor SkillLoader {
                     "Read and summarize the top results visible on screen"
                 ],
                 permissions: ["open_application": "tier1"],
-                maxIterations: 25,
+                maxIterations: 15,
                 isEnabled: true,
                 filePath: nil,
                 isBuiltIn: true
@@ -357,7 +383,7 @@ actor SkillLoader {
                     "Report a summary of what was moved"
                 ],
                 permissions: ["run_shell_command": "tier2"],
-                maxIterations: 25,
+                maxIterations: 15,
                 isEnabled: true,
                 filePath: nil,
                 isBuiltIn: true
@@ -377,7 +403,7 @@ actor SkillLoader {
                     "Take a final screenshot to confirm the app is open and configured as requested"
                 ],
                 permissions: ["open_application": "tier1", "run_applescript": "tier2"],
-                maxIterations: 25,
+                maxIterations: 15,
                 isEnabled: true,
                 filePath: nil,
                 isBuiltIn: true
@@ -506,7 +532,7 @@ actor SkillLoader {
         var triggers: [String] = []
         var steps: [String] = []
         var permissions: [String: String] = [:]
-        var maxIterations: Int = 20
+        var maxIterations: Int = 15
 
         var currentSection: String?
 
@@ -559,15 +585,23 @@ actor SkillLoader {
             case "steps":
                 // Expect numbered lines: 1. Step description
                 let stepPattern = #"^\d+\.\s+"#
-                if let regex = try? NSRegularExpression(pattern: stepPattern),
-                   regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
-                    let step = trimmed.replacingOccurrences(
-                        of: #"^\d+\.\s+"#,
-                        with: "",
-                        options: .regularExpression
-                    )
-                    steps.append(step)
-                } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                var stepRegexMatch = false
+                do {
+                    let regex = try NSRegularExpression(pattern: stepPattern)
+                    if regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
+                        stepRegexMatch = true
+                        let step = trimmed.replacingOccurrences(
+                            of: #"^\d+\.\s+"#,
+                            with: "",
+                            options: .regularExpression
+                        )
+                        steps.append(step)
+                    }
+                } catch {
+                    logger.error("Failed to compile step-parsing regex '\(stepPattern)': \(error.localizedDescription)")
+                    NSLog("CyclopOne [SkillLoader]: Step-parsing regex failed: '%@' — %@", stepPattern, error.localizedDescription)
+                }
+                if !stepRegexMatch && (trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ")) {
                     steps.append(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces))
                 }
 
@@ -607,6 +641,91 @@ actor SkillLoader {
             filePath: filePath,
             isBuiltIn: false
         )
+    }
+
+    // MARK: - Skill Validation
+
+    /// Validate all regex patterns in a skill file before saving.
+    ///
+    /// Parses the skill content, then attempts to compile every trigger regex.
+    /// Returns an array of error descriptions for any invalid patterns.
+    /// An empty array means all patterns are valid.
+    ///
+    /// - Parameter content: The SKILL.md file content to validate.
+    /// - Returns: Array of validation error descriptions. Empty if all valid.
+    func validateSkillFile(_ content: String) -> [String] {
+        guard let skill = parseSkillContent(content) else {
+            return ["Failed to parse skill file: missing name or triggers"]
+        }
+
+        var errors: [String] = []
+
+        if skill.triggers.isEmpty {
+            errors.append("Skill '\(skill.name)' has no trigger patterns defined")
+        }
+
+        for pattern in skill.triggers {
+            do {
+                _ = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+            } catch {
+                errors.append("Invalid regex '\(pattern)' in skill '\(skill.name)': \(error.localizedDescription)")
+            }
+        }
+
+        if skill.steps.isEmpty {
+            errors.append("Skill '\(skill.name)' has no steps defined")
+        }
+
+        return errors
+    }
+
+    /// Validate all trigger regex patterns across all loaded skills.
+    ///
+    /// Iterates every skill in `self.skills`, attempts to compile each trigger pattern,
+    /// and collects errors. Logs a summary via NSLog and os.log.
+    ///
+    /// - Returns: A dictionary mapping skill names to arrays of error descriptions.
+    ///            Skills with all valid triggers are omitted from the result.
+    @discardableResult
+    func validateSkillTriggers() -> [String: [String]] {
+        var report: [String: [String]] = [:]
+
+        for skill in skills {
+            var errors: [String] = []
+            for pattern in skill.triggers {
+                do {
+                    _ = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+                } catch {
+                    let msg = "Invalid regex '\(pattern)': \(error.localizedDescription)"
+                    errors.append(msg)
+                    logger.error("Skill '\(skill.name)' trigger validation failed — \(msg)")
+                    NSLog("CyclopOne [SkillLoader]: Skill '%@' trigger validation failed — pattern='%@' error=%@",
+                          skill.name, pattern, error.localizedDescription)
+                }
+            }
+
+            if skill.triggers.isEmpty {
+                let msg = "No trigger patterns defined"
+                errors.append(msg)
+                logger.warning("Skill '\(skill.name)' has no trigger patterns")
+                NSLog("CyclopOne [SkillLoader]: Skill '%@' has no trigger patterns", skill.name)
+            }
+
+            if !errors.isEmpty {
+                report[skill.name] = errors
+            }
+        }
+
+        if report.isEmpty {
+            logger.info("All \(self.skills.count) skill(s) passed trigger validation")
+            NSLog("CyclopOne [SkillLoader]: All %d skill(s) passed trigger validation", skills.count)
+        } else {
+            let totalErrors = report.values.reduce(0) { $0 + $1.count }
+            logger.warning("\(report.count) skill(s) have trigger errors (\(totalErrors) total)")
+            NSLog("CyclopOne [SkillLoader]: %d skill(s) have trigger errors (%d total)", report.count, totalErrors)
+        }
+
+        return report
     }
 
     // MARK: - Private: UserDefaults Persistence
@@ -709,13 +828,26 @@ actor SkillLoader {
     }
 
     /// Build a regex trigger pattern from common words.
+    /// Validates the generated regex before returning it.
+    /// Returns an empty string if the pattern cannot be compiled.
     private func buildTriggerPattern(from words: [String]) -> String {
         guard !words.isEmpty else { return "" }
 
         let escaped = words.prefix(4).map { NSRegularExpression.escapedPattern(for: $0) }
         // Build a pattern that matches if all key words are present (in any order)
         let parts = escaped.map { "(?=.*\\b\($0)\\b)" }
-        return "(?i)" + parts.joined() + ".*"
+        let pattern = "(?i)" + parts.joined() + ".*"
+
+        // Validate the generated pattern compiles before returning
+        do {
+            _ = try NSRegularExpression(pattern: pattern, options: [])
+        } catch {
+            logger.error("Generated trigger pattern failed to compile: '\(pattern)' — \(error.localizedDescription)")
+            NSLog("CyclopOne [SkillLoader]: Generated trigger pattern failed to compile: '%@' — %@", pattern, error.localizedDescription)
+            return ""
+        }
+
+        return pattern
     }
 }
 

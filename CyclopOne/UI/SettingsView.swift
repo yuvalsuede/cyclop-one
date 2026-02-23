@@ -9,12 +9,22 @@ struct SettingsView: View {
     // General
     @State private var apiKey: String = ""
     @State private var showAPIKey: Bool = false
-    @AppStorage("selectedModel") private var selectedModel: String = "claude-sonnet-4-6"
+    @AppStorage("selectedModel") private var selectedModel: String = "claude-haiku-4-5-20251001"
     @State private var savedMessage: String?
 
+    // Telegram
+    @State private var telegramToken: String = ""
+    @State private var showTelegramToken: Bool = false
+    @State private var telegramSavedMessage: String?
+    @State private var telegramConnected: Bool = false
+    @AppStorage("telegramChatID") private var telegramChatID: Int = 0
+
     // Agent behavior
-    @AppStorage("maxIterations") private var maxIterations: Double = 20
+    @AppStorage("maxIterations") private var maxIterations: Double = 15
     @AppStorage("confirmDestructive") private var confirmDestructive: Bool = true
+
+    // Memory Vault
+    @State private var legacyVaultExists: Bool = false
 
     // Disk usage (Sprint 16)
     @State private var diskUsage: RunJournal.DiskUsageInfo?
@@ -22,9 +32,10 @@ struct SettingsView: View {
     @State private var cleanupMessage: String?
 
     private let models = [
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Fast)"),
-        ("claude-opus-4-6", "Claude Opus 4.6 (Capable)"),
-        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 (Fastest)"),
+        ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5 ($3/$15)"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6 ($3/$15)"),
+        ("claude-opus-4-6", "Claude Opus 4.6 ($5/$25)"),
+        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 ($1/$5)"),
     ]
 
     var body: some View {
@@ -118,6 +129,125 @@ struct SettingsView: View {
                         .font(.system(.body, design: .monospaced))
                 }
                 Text("Press Command+Shift+A anywhere to show/hide the Cyclop One panel.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Telegram") {
+                HStack {
+                    if showTelegramToken {
+                        TextField("Bot token from @BotFather", text: $telegramToken)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    } else {
+                        SecureField("Bot token from @BotFather", text: $telegramToken)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    Button(action: { showTelegramToken.toggle() }) {
+                        Image(systemName: showTelegramToken ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                }
+
+                HStack {
+                    Button("Save Token") {
+                        if KeychainService.shared.setTelegramToken(telegramToken) {
+                            telegramSavedMessage = "Token saved. Connecting..."
+                            let gw = coordinator.gateway
+                            let tok = telegramToken
+                            Task.detached {
+                                await TelegramService.shared.start(gateway: gw, token: tok)
+                            }
+                            // Check status after a delay
+                            Task {
+                                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                                checkTelegramStatus()
+                            }
+                        } else {
+                            telegramSavedMessage = "Failed to save token."
+                        }
+                    }
+                    .disabled(telegramToken.isEmpty)
+
+                    if telegramConnected {
+                        Button("Disconnect") {
+                            Task {
+                                await TelegramService.shared.stop()
+                                KeychainService.shared.deleteTelegramToken()
+                                telegramToken = ""
+                                telegramConnected = false
+                                telegramSavedMessage = "Disconnected."
+                            }
+                        }
+                        .foregroundColor(.red)
+                    }
+
+                    if let msg = telegramSavedMessage {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundColor(msg.contains("Failed") ? .red : .green)
+                    }
+                }
+
+                HStack {
+                    Image(systemName: telegramConnected ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundColor(telegramConnected ? .green : .secondary)
+                    Text(telegramConnected ? "Connected" : "Not connected")
+                        .font(.caption)
+                    if telegramChatID != 0 {
+                        Spacer()
+                        Text("Chat ID: \(telegramChatID)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Create a bot via @BotFather on Telegram, paste the token here. Then send /start to your bot to connect.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Memory Vault") {
+                HStack {
+                    Text("Vault location")
+                    Spacer()
+                    Text("~/Documents/Obsidian Vault/Cyclop One/")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                HStack {
+                    Button("Open in Finder") {
+                        let path = MemoryService.shared.vaultRootPath
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+                    }
+
+                    Button("Open in Obsidian") {
+                        let obsidianURL = URL(string: "obsidian://open?vault=Cyclop%20One")!
+                        if NSWorkspace.shared.urlForApplication(toOpen: obsidianURL) != nil {
+                            NSWorkspace.shared.open(obsidianURL)
+                        } else {
+                            // Obsidian not installed — fall back to Finder
+                            let path = MemoryService.shared.vaultRootPath
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+                        }
+                    }
+                }
+
+                if legacyVaultExists {
+                    HStack {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.blue)
+                        Text("Legacy vault found at ~/.cyclopone/memory/. It has been migrated and can be safely deleted.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Your agent's memory is stored as plain Markdown files. Open the vault in Obsidian to browse, search, and edit notes. Changes you make are picked up automatically.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -243,6 +373,18 @@ struct SettingsView: View {
 
     private func loadSettings() {
         apiKey = KeychainService.shared.getAPIKey() ?? ""
+        telegramToken = KeychainService.shared.getTelegramToken() ?? ""
+        checkTelegramStatus()
+        legacyVaultExists = FileManager.default.fileExists(atPath: MemoryService.legacyVaultRoot.path)
+    }
+
+    private func checkTelegramStatus() {
+        Task {
+            let started = await TelegramService.shared.isStarted
+            await MainActor.run {
+                telegramConnected = started
+            }
+        }
     }
 
     private func checkScreenRecording() -> Bool {

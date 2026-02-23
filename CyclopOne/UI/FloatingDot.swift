@@ -5,12 +5,45 @@ import Combine
 // MARK: - Popover Content View
 
 /// Popover shown when the user clicks the floating dot.
-/// Shows status, command input, stop button.
+/// Shows status, command input, stop button, command history, and error history.
 struct DotPopoverView: View {
     @EnvironmentObject var coordinator: AgentCoordinator
     @State private var commandText = ""
     @FocusState private var isCommandFocused: Bool
     let onDismiss: () -> Void
+
+    /// Past user commands (most recent first, max 10)
+    private var commandHistory: [ChatMessage] {
+        coordinator.messages
+            .filter { $0.role == .user }
+            .suffix(10)
+            .reversed()
+    }
+
+    /// Recent error/warning messages from the agent (most recent first, max 10).
+    /// Filters system messages that contain error or warning indicators.
+    private var errorHistory: [ChatMessage] {
+        coordinator.messages
+            .filter { msg in
+                guard msg.role == .system else { return false }
+                let lower = msg.content.lowercased()
+                return lower.contains("error") ||
+                       lower.contains("warning") ||
+                       lower.contains("failed") ||
+                       lower.contains("cancelled") ||
+                       lower.contains("timed out") ||
+                       lower.contains("abort") ||
+                       lower.contains("stuck")
+            }
+            .suffix(10)
+            .reversed()
+    }
+
+    /// Whether the agent state is in error
+    private var isErrorState: Bool {
+        if case .error = coordinator.state { return true }
+        return false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -21,8 +54,9 @@ struct DotPopoverView: View {
                     .frame(width: 6, height: 6)
                 Text(coordinator.state.displayText)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+                    .foregroundColor(isErrorState ? .red : .secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Spacer()
 
@@ -39,8 +73,37 @@ struct DotPopoverView: View {
                 }
             }
 
-            // Current task summary
-            if let lastMessage = coordinator.messages.last(where: { $0.role == .assistant && !$0.isLoading && !$0.content.isEmpty }) {
+            // Confirmation UI — show approve/deny when awaiting confirmation
+            if case .awaitingConfirmation(let action) = coordinator.state {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(action)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Button("Allow") {
+                            coordinator.approveConfirmation()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .controlSize(.small)
+
+                        Button("Deny") {
+                            coordinator.denyConfirmation()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+                .background(Color.yellow.opacity(0.1))
+                .cornerRadius(8)
+            }
+
+            // Current task summary — only show when actively running (not idle, not error)
+            if coordinator.state.isActive,
+               let lastMessage = coordinator.messages.last(where: { $0.role == .assistant && !$0.isLoading && !$0.content.isEmpty }) {
                 Text(lastMessage.content)
                     .font(.system(size: 11))
                     .foregroundColor(.primary)
@@ -72,10 +135,110 @@ struct DotPopoverView: View {
             .background(Color.primary.opacity(0.05))
             .cornerRadius(8)
 
-            // Token count
-            Text("\(coordinator.totalTokensUsed) tokens used")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary.opacity(0.6))
+            // Error history section — always visible when there are errors
+            if !errorHistory.isEmpty {
+                Divider().opacity(0.3)
+
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.red.opacity(0.7))
+                    Text("Errors")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.red.opacity(0.8))
+                    Spacer()
+                    Text("\(errorHistory.count)")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(.red.opacity(0.6))
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(errorHistory) { msg in
+                            HStack(alignment: .top, spacing: 6) {
+                                Circle()
+                                    .fill(Color.red.opacity(0.6))
+                                    .frame(width: 4, height: 4)
+                                    .padding(.top, 4)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(msg.content)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.red.opacity(0.9))
+                                        .lineLimit(2)
+                                        .truncationMode(.tail)
+                                    Text(msg.timestamp, style: .relative)
+                                        .font(.system(size: 8))
+                                        .foregroundColor(.secondary.opacity(0.5))
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 80)
+            }
+
+            // Command history section
+            if !commandHistory.isEmpty {
+                Divider().opacity(0.3)
+
+                HStack {
+                    Text("History")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(commandHistory) { msg in
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.up.circle")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary.opacity(0.5))
+                                Text(msg.content)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary.opacity(0.8))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if !coordinator.state.isActive {
+                                    commandText = msg.content
+                                }
+                            }
+                            .help("Click to reuse this command")
+                        }
+                    }
+                }
+                .frame(maxHeight: 80)
+            }
+
+            // Footer: Clear button + token count
+            Divider().opacity(0.3)
+
+            HStack {
+                Button(action: {
+                    coordinator.clearConversation()
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 9))
+                        Text("Clear All")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundColor(.secondary.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .disabled(coordinator.state.isActive)
+                .help("Clear all messages, errors, and history")
+
+                Spacer()
+
+                Text("\(coordinator.totalTokensUsed) tokens")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
         }
         .padding(12)
         .frame(width: 280)

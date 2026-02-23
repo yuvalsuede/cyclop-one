@@ -130,7 +130,19 @@ class AgentCoordinator: ObservableObject {
         await agentLoop.finishRun()
 
         messages.removeAll { $0.isLoading }
-        if case .error = state {} else { state = .idle }
+
+        // Surface run failure to the user if no error message was already shown.
+        // The onMessage callback may have already added an error, so check
+        // whether the last message is already a system error to avoid duplicates.
+        if !result.success {
+            let lastIsSystemError = messages.last.map { $0.role == .system && $0.content.hasPrefix("Error") } ?? false
+            if !lastIsSystemError {
+                messages.append(ChatMessage(role: .system, content: "Run failed: \(result.summary)"))
+            }
+            if case .error = state {} else { state = .error(result.summary) }
+        } else {
+            if case .error = state {} else { state = .idle }
+        }
         isRunning = false
 
         // Update token count from the run result
@@ -277,7 +289,17 @@ class AgentCoordinator: ObservableObject {
         await agentLoop.finishRun()
 
         messages.removeAll { $0.isLoading }
-        if case .error = state {} else { state = .idle }
+
+        // Surface resume run failure to the user
+        if let result = result, !result.success {
+            let lastIsSystemError = messages.last.map { $0.role == .system && $0.content.hasPrefix("Error") } ?? false
+            if !lastIsSystemError {
+                messages.append(ChatMessage(role: .system, content: "Run failed: \(result.summary)"))
+            }
+            if case .error = state {} else { state = .error(result.summary) }
+        } else {
+            if case .error = state {} else { state = .idle }
+        }
         isRunning = false
 
         if let result = result {

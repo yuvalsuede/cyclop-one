@@ -18,6 +18,7 @@ actor AgentLoop {
         "remember", "recall",
         "vault_read", "vault_write", "vault_search", "vault_list", "vault_append",
         "task_create", "task_update", "task_list", "task_complete",
+        "take_screenshot", "read_screen",
         "shell_exec", "run_shell_command"
     ]
 
@@ -25,6 +26,18 @@ actor AgentLoop {
     private let capture = ScreenCaptureService.shared
     private let executor = ActionExecutor.shared
     private let accessibility = AccessibilityService.shared
+    private let safetyGate: ActionSafetyGate
+
+    /// Sliding window of recent tool calls for context-aware safety evaluation.
+    private var recentToolCallHistory: [(name: String, summary: String)] = []
+
+    /// Sliding window of recent tool calls (name + serialized input) for repetition detection.
+    /// When the same tool is called with identical parameters 3 times in a row, a warning
+    /// is injected into the conversation to break the loop.
+    private var recentToolCallFingerprints: [String] = []
+
+    /// Number of consecutive identical tool calls that triggers a warning injection.
+    private let repetitionWarningThreshold: Int = 3
 
     private var config: AgentConfig
     private var isCancelled = false
@@ -42,6 +55,12 @@ actor AgentLoop {
     /// Memory context injected by the Orchestrator from MemoryService.
     /// Included in the system prompt for persistent memory across runs.
     private var memoryContext: String = ""
+
+    /// Current step instruction from the Orchestrator's plan.
+    /// Replaces the old `brainPlan` property. Set by the Orchestrator
+    /// before each plan step begins. Contains only the current step's
+    /// action + context, NOT the full plan.
+    private var currentStepInstruction: String = ""
 
     /// Sprint 19: Current iteration count for conversation pruning.
     private var iterationCount: Int = 0
@@ -80,6 +99,10 @@ actor AgentLoop {
 
     init(config: AgentConfig = AgentConfig()) {
         self.config = config
+        self.safetyGate = ActionSafetyGate(
+            brainModel: config.brainModel,
+            permissionMode: config.permissionMode
+        )
     }
 
     func setPanel(_ panel: NSPanel) {
@@ -288,6 +311,7 @@ actor AgentLoop {
         self.completionToken = completionToken
         consecutiveAPIFailures = 0
         iterationCount = 0
+        recentToolCallFingerprints.removeAll()
 
         // ── Determine the target app ──
         // If a PID was supplied (captured when the popover opened), use it.
@@ -403,13 +427,15 @@ actor AgentLoop {
     func executeIteration(
         onStateChange: @Sendable @escaping (AgentState) -> Void,
         onMessage: @Sendable @escaping (ChatMessage) -> Void,
-        onConfirmationNeeded: @Sendable @escaping (String) async -> Bool
+        onConfirmationNeeded: @Sendable @escaping (String) async -> Bool,
+        observer: (any AgentObserver)? = nil
     ) async throws -> IterationResult {
-        guard !isCancelled else {
+        // M6: Check both cooperative flag AND Task cancellation
+        guard !isCancelled && !Task.isCancelled else {
             return IterationResult(
                 textContent: "", hasMoreWork: false, screenshot: nil,
                 inputTokens: 0, outputTokens: 0, cancelled: true,
-                hasVisualToolCalls: false
+                hasVisualToolCalls: false, toolCallSummaries: []
             )
         }
 
@@ -431,25 +457,59 @@ actor AgentLoop {
         // prompt injection attacks. Claude outputs a canonical marker; the Orchestrator
         // validates it independently using the secret token.
         var systemPrompt = ToolDefinitions.buildSystemPrompt(memoryContext: memoryContext, skillContext: skillContext)
+
+        // Inject current step instruction if available (set by Orchestrator per-step)
+        if !currentStepInstruction.isEmpty {
+            systemPrompt += """
+
+
+            ## Current Task
+            \(currentStepInstruction)
+
+            Focus ONLY on this specific task. When you have completed it and can see the \
+            expected result on screen, output <task_complete/> to signal completion.
+            Do NOT proceed to other tasks. Do NOT take actions beyond this instruction.
+            """
+        }
+
         if let token = completionToken, !token.isEmpty {
             systemPrompt += """
 
 
-            ## Completion Protocol
+            ## Completion Protocol — YOU MUST FOLLOW THIS
             When you have completed the user's task, output exactly: <task_complete/>
 
-            Guidelines for when to declare completion:
-            - If the task was to open an app: it's open and visible → complete.
-            - If the task was to type text: the text is visible on screen → complete.
-            - If the task was to click something: you clicked it and saw the result → complete.
-            - If the task was to navigate to a URL: the page loaded → complete.
-            - If the task was to send a message: you typed it and pressed Enter/Send → complete.
-            - For multi-step tasks: complete each step, then declare done after the LAST step.
+            ### When to declare completion (do it IMMEDIATELY when any of these are true):
+            - Task was to open an app → it is open and visible → output <task_complete/>
+            - Task was to type text → the text is visible in the field → output <task_complete/>
+            - Task was to click something → you clicked it and saw the result → output <task_complete/>
+            - Task was to navigate to a URL → the page loaded → output <task_complete/>
+            - Task was to send a message → you pressed Enter/Send → output <task_complete/>
+            - Multi-step task → you completed the LAST step → output <task_complete/>
 
-            Do NOT keep iterating after the core action is done. If you already performed the \
-            requested action and can see the expected result on screen, output <task_complete/> immediately.
-            Do NOT output <task_complete/> before actually performing the action.
+            ### Mandatory rules:
+            - Do NOT keep iterating after the core action is done. One verification screenshot is enough.
+            - Do NOT output <task_complete/> before actually performing the action.
+            - Do NOT repeat the same tool call with identical parameters. If an action failed, \
+              try a COMPLETELY different approach.
+            - If you have tried 3 different approaches without success, output <task_complete/> \
+              with a failure explanation. Do NOT keep trying the same thing.
+            - If you are on iteration 10+, you MUST either complete the task or output <task_complete/> \
+              with a summary of what you accomplished and what remains.
+            - NEVER take more than 2 consecutive screenshots without performing an action between them.
+
+            ### Current iteration: \(iterationCount) of \(config.maxIterations)
             """
+        }
+
+        // M6: Bail immediately if cancelled before the expensive API call
+        try Task.checkCancellation()
+
+        // Validate conversation history integrity before sending to API.
+        // Pruning can break tool_use/tool_result pairs; this catches and fixes them.
+        let historyWasValid = validateConversationHistory()
+        if !historyWasValid {
+            NSLog("CyclopOne [AgentLoop]: Conversation history had broken tool pairs — repaired before API call (iteration=%d)", iterationCount)
         }
 
         // Sprint 14: API call with retry logic
@@ -457,6 +517,20 @@ actor AgentLoop {
             systemPrompt: systemPrompt,
             onMessage: onMessage
         )
+
+        // M6: Check cancellation after the API call returns
+        guard !isCancelled && !Task.isCancelled else {
+            return IterationResult(
+                textContent: response.textContent,
+                hasMoreWork: false,
+                screenshot: latestScreenshot,
+                inputTokens: response.inputTokens,
+                outputTokens: response.outputTokens,
+                cancelled: true,
+                hasVisualToolCalls: false,
+                toolCallSummaries: []
+            )
+        }
 
         // API call succeeded: reset consecutive failure counter
         consecutiveAPIFailures = 0
@@ -480,15 +554,18 @@ actor AgentLoop {
                 inputTokens: response.inputTokens,
                 outputTokens: response.outputTokens,
                 cancelled: false,
-                hasVisualToolCalls: false
+                hasVisualToolCalls: false,
+                toolCallSummaries: []
             )
         }
 
         // -- Execute tool calls --
         var lastScreenshot: ScreenCapture? = nil
         var hasVisualToolCalls = false
+        var toolCallSummaries: [ToolCallSummary] = []
         for toolUse in response.toolUses {
-            if isCancelled {
+            // M6: Check BOTH cooperative flag and Task cancellation before each tool
+            if isCancelled || Task.isCancelled {
                 return IterationResult(
                     textContent: textContent,
                     hasMoreWork: false,
@@ -496,7 +573,8 @@ actor AgentLoop {
                     inputTokens: response.inputTokens,
                     outputTokens: response.outputTokens,
                     cancelled: true,
-                    hasVisualToolCalls: hasVisualToolCalls
+                    hasVisualToolCalls: hasVisualToolCalls,
+                    toolCallSummaries: toolCallSummaries
                 )
             }
 
@@ -513,8 +591,62 @@ actor AgentLoop {
                 onConfirmationNeeded: onConfirmationNeeded
             )
 
+            // M3: Notify observer of tool execution (fire-and-forget with 5s timeout
+            // to prevent slow Telegram I/O from blocking the agent iteration loop)
+            if let obs = observer {
+                let toolName = toolUse.name
+                let summary = toolResult.result
+                let isError = toolResult.isError
+                let screenshotData = (!Self.nonVisualTools.contains(toolName))
+                    ? toolResult.screenshot?.imageData : nil
+
+                Task {
+                    await Self.fireAndForgetObserver(timeout: 5.0) {
+                        await obs.onToolExecution(
+                            toolName: toolName,
+                            summary: summary,
+                            isError: isError
+                        )
+                    }
+                    if let ssData = screenshotData {
+                        await Self.fireAndForgetObserver(timeout: 5.0) {
+                            await obs.onScreenshot(
+                                imageData: ssData,
+                                context: "After \(toolName)"
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Surface tool errors to the UI so the user can see what went wrong
+            if toolResult.isError {
+                onMessage(ChatMessage(role: .system, content: "Tool error (\(toolUse.name)): \(toolResult.result)"))
+            }
+
+            // Collect tool call summary for verification
+            toolCallSummaries.append(ToolCallSummary(
+                toolName: toolUse.name,
+                resultText: String(toolResult.result.prefix(500)),
+                isError: toolResult.isError
+            ))
+
             if let ss = toolResult.screenshot {
                 lastScreenshot = ss
+            }
+
+            // M5: Track recent tool calls for safety gate context
+            recentToolCallHistory.append((name: toolUse.name, summary: String(toolResult.result.prefix(200))))
+            if recentToolCallHistory.count > 5 {
+                recentToolCallHistory.removeFirst()
+            }
+
+            // Track tool call fingerprint for repetition detection.
+            // Fingerprint = tool name + sorted serialized input parameters.
+            let fingerprint = buildToolCallFingerprint(name: toolUse.name, input: toolUse.input)
+            recentToolCallFingerprints.append(fingerprint)
+            if recentToolCallFingerprints.count > repetitionWarningThreshold + 2 {
+                recentToolCallFingerprints.removeFirst()
             }
 
             let resultMsg = ClaudeAPIService.buildToolResultMessage(
@@ -524,6 +656,27 @@ actor AgentLoop {
                 screenshot: toolResult.screenshot
             )
             conversationHistory.append(resultMsg)
+        }
+
+        // Repetition detection: if the last N tool calls have identical fingerprints,
+        // inject a warning message into the conversation to break the loop.
+        if detectToolCallRepetition() {
+            let warningText = """
+            WARNING: You are repeating the same action with identical parameters. \
+            This will not produce a different result. You MUST try a completely different \
+            approach or declare the task complete with <task_complete/>. \
+            If you cannot find another way to accomplish the task, output <task_complete/> \
+            with an explanation of what went wrong.
+            """
+            let warningMsg: [String: Any] = [
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": warningText] as [String: Any]
+                ] as [[String: Any]]
+            ]
+            conversationHistory.append(warningMsg)
+            onMessage(ChatMessage(role: .system, content: "Repetition detected — injecting warning to break loop."))
+            NSLog("CyclopOne [AgentLoop]: Repetition warning injected at iteration %d", iterationCount)
         }
 
         // Brief pause between iterations
@@ -540,7 +693,8 @@ actor AgentLoop {
             inputTokens: response.inputTokens,
             outputTokens: response.outputTokens,
             cancelled: false,
-            hasVisualToolCalls: hasVisualToolCalls
+            hasVisualToolCalls: hasVisualToolCalls,
+            toolCallSummaries: toolCallSummaries
         )
     }
 
@@ -570,6 +724,9 @@ actor AgentLoop {
         var lastError: Error?
 
         for attempt in 0..<maxRetryAttempts {
+            // M6: Check cancellation before each attempt
+            try Task.checkCancellation()
+
             do {
                 NSLog("CyclopOne [AgentLoop]: Calling Claude API (model=%@, messages=%d, attempt=%d/%d)",
                       config.modelName, conversationHistory.count, attempt + 1, maxRetryAttempts)
@@ -582,6 +739,9 @@ actor AgentLoop {
                 NSLog("CyclopOne [AgentLoop]: API success — %d content blocks, stopReason=%@, tokens=%d/%d",
                       response.contentBlocks.count, response.stopReason, response.inputTokens, response.outputTokens)
                 return response
+            } catch is CancellationError {
+                // M6: Propagate cancellation immediately, no retry
+                throw CancellationError()
             } catch {
                 NSLog("CyclopOne [AgentLoop]: API error (attempt %d): %@", attempt + 1, error.localizedDescription)
                 lastError = error
@@ -618,6 +778,10 @@ actor AgentLoop {
                 case .unknown:
                     let delay = 3.0 * pow(2.0, Double(attempt))  // 3s, 6s, 12s
                     if attempt < maxRetryAttempts - 1 {
+                        onMessage(ChatMessage(
+                            role: .system,
+                            content: "API error (unknown). Retrying in \(Int(delay))s (attempt \(attempt + 2)/\(maxRetryAttempts))..."
+                        ))
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         continue
                     }
@@ -636,6 +800,7 @@ actor AgentLoop {
     /// Called by the Orchestrator (or legacy run()) when the run is done.
     func finishRun() async {
         completionToken = nil
+        currentStepInstruction = ""
         await restorePanelInteraction()
     }
 
@@ -702,6 +867,92 @@ actor AgentLoop {
         isCancelled = true
     }
 
+    /// Inject strategic guidance from the brain model into the conversation.
+    /// Called by the Orchestrator when the agent is stuck and Opus provides advice.
+    ///
+    /// SECURITY: Guidance is sanitized before injection. Lines containing
+    /// instruction-override patterns (e.g., "ignore safety", "bypass", "override",
+    /// "disable safety", "you are now", "delete all", "execute") are stripped to
+    /// prevent a compromised brain model from escalating privileges.
+    func injectBrainGuidance(_ guidance: String) {
+        let sanitized = sanitizeBrainGuidance(guidance)
+
+        if sanitized.isEmpty {
+            NSLog("CyclopOne [AgentLoop]: WARNING — Brain guidance REJECTED entirely after sanitization (original %d chars)", guidance.count)
+            return
+        }
+
+        conversationHistory.append([
+            "role": "user",
+            "content": [
+                ["type": "text", "text": "[STRATEGIC GUIDANCE FROM SUPERVISOR]\n\nYou appear to be stuck repeating the same actions. Here is advice from a senior model on how to proceed:\n\n\(sanitized)\n\nTry a different approach based on this guidance."]
+            ]
+        ])
+        NSLog("CyclopOne [AgentLoop]: Injected brain guidance (%d chars, sanitized from %d chars) into conversation",
+              sanitized.count, guidance.count)
+    }
+
+    /// Sanitize brain guidance by removing lines that contain instruction-override patterns.
+    /// Returns the cleaned guidance string with dangerous lines stripped.
+    private func sanitizeBrainGuidance(_ guidance: String) -> String {
+        // Patterns that indicate attempts to override safety or inject harmful instructions.
+        // Matched case-insensitively against each line of the guidance.
+        let dangerousPatterns: [String] = [
+            "ignore",
+            "bypass",
+            "override",
+            "execute",
+            "delete all",
+            "disable safety",
+            "you are now",
+            "forget your",
+            "forget all",
+            "new instructions",
+            "disregard",
+            "pretend you",
+            "act as if",
+            "sudo",
+            "rm -rf",
+            "drop table",
+            "ignore previous",
+            "ignore above",
+            "system prompt",
+        ]
+
+        let lines = guidance.components(separatedBy: .newlines)
+        var cleanLines: [String] = []
+        var strippedCount = 0
+
+        for line in lines {
+            let lowerLine = line.lowercased().trimmingCharacters(in: .whitespaces)
+
+            // Skip empty lines (preserve them)
+            if lowerLine.isEmpty {
+                cleanLines.append(line)
+                continue
+            }
+
+            let isDangerous = dangerousPatterns.contains { pattern in
+                lowerLine.contains(pattern)
+            }
+
+            if isDangerous {
+                strippedCount += 1
+                NSLog("CyclopOne [AgentLoop]: SANITIZED — Stripped dangerous line from brain guidance: '%@'",
+                      String(line.prefix(120)))
+            } else {
+                cleanLines.append(line)
+            }
+        }
+
+        if strippedCount > 0 {
+            NSLog("CyclopOne [AgentLoop]: Brain guidance sanitization stripped %d of %d lines",
+                  strippedCount, lines.count)
+        }
+
+        return cleanLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func clearHistory() {
         conversationHistory.removeAll()
         latestScreenshot = nil
@@ -710,6 +961,8 @@ actor AgentLoop {
         iterationCount = 0
         skillContext = ""
         memoryContext = ""
+        recentToolCallHistory.removeAll()
+        recentToolCallFingerprints.removeAll()
     }
 
     // MARK: - Conversation History Pruning (Sprint 19)
@@ -743,6 +996,51 @@ actor AgentLoop {
         conversationHistory.append(message)
     }
 
+    /// Inject an iteration budget warning into the conversation history.
+    /// Used by the Orchestrator to tell the model it's running out of iterations
+    /// and should focus on completing or declaring the task impossible.
+    func injectIterationWarning(_ warning: String) {
+        let message: [String: Any] = [
+            "role": "user",
+            "content": [
+                ["type": "text", "text": "[ITERATION BUDGET WARNING]\n\n\(warning)"] as [String: Any]
+            ] as [[String: Any]]
+        ]
+        conversationHistory.append(message)
+        NSLog("CyclopOne [AgentLoop]: Injected iteration warning into conversation")
+    }
+
+    // MARK: - Tool Call Repetition Detection
+
+    /// Build a deterministic fingerprint for a tool call (name + sorted input params).
+    /// Used to detect when the agent is repeating the exact same action.
+    private func buildToolCallFingerprint(name: String, input: [String: Any]) -> String {
+        let sortedKeys = input.keys.sorted()
+        let paramParts = sortedKeys.map { key -> String in
+            let value: String
+            if let str = input[key] as? String {
+                value = str
+            } else if let num = input[key] as? NSNumber {
+                value = num.stringValue
+            } else if let bool = input[key] as? Bool {
+                value = bool ? "true" : "false"
+            } else {
+                value = String(describing: input[key] ?? "nil")
+            }
+            return "\(key)=\(value)"
+        }
+        return "\(name)|\(paramParts.joined(separator: "&"))"
+    }
+
+    /// Detect if the last N tool calls have identical fingerprints (same tool, same params).
+    /// Returns true if repetition threshold is met, signaling the agent is stuck in a loop.
+    private func detectToolCallRepetition() -> Bool {
+        guard recentToolCallFingerprints.count >= repetitionWarningThreshold else { return false }
+        let recent = Array(recentToolCallFingerprints.suffix(repetitionWarningThreshold))
+        let first = recent[0]
+        return recent.dropFirst().allSatisfy { $0 == first }
+    }
+
     /// Append a raw message to conversation history. Exposed for testing via @testable import.
     func appendMessageForTesting(_ message: [String: Any]) {
         conversationHistory.append(message)
@@ -764,28 +1062,95 @@ actor AgentLoop {
     /// Older screenshots are replaced with `[screenshot removed]`.
     func pruneConversationHistory() {
         // Enforce max conversation message count to prevent unbounded growth.
-        // Keep only the first message (initial user prompt) and the most recent messages.
+        // Remove messages as COMPLETE CYCLES to avoid orphaning tool_use/tool_result pairs.
         //
-        // CRITICAL: After removing messages, we must clean up BOTH:
-        // 1. Orphaned tool_result blocks (tool_use was evicted, tool_result remains)
-        // 2. Orphaned tool_use blocks (tool_result was evicted, tool_use remains)
-        // The Claude API rejects both cases.
+        // A cycle is either:
+        //   - An assistant message containing tool_use + the immediately following user message
+        //     containing the matching tool_result(s) (2 messages removed together)
+        //   - A standalone assistant message with NO tool_use blocks (1 message)
+        //   - A standalone user message with NO tool_result blocks (1 message, rare in middle)
+        //
+        // We always preserve message[0] (initial user intent) and the most recent messages.
         if conversationHistory.count > maxConversationMessages {
+            // Identify removable cycles in the middle of the conversation.
+            // Skip message[0] (preserved) and work from index 1 forward.
+            var cycleStartIndices: [Int] = []
+            var cycleLengths: [Int] = []
+            var i = 1  // Skip message[0]
+
+            while i < conversationHistory.count {
+                let message = conversationHistory[i]
+                let role = message["role"] as? String ?? ""
+
+                if role == "assistant" {
+                    // Check if this assistant message contains tool_use blocks
+                    let hasToolUse: Bool
+                    if let content = message["content"] as? [[String: Any]] {
+                        hasToolUse = content.contains { ($0["type"] as? String) == "tool_use" }
+                    } else {
+                        hasToolUse = false
+                    }
+
+                    if hasToolUse {
+                        // This assistant message has tool_use — the next message MUST be
+                        // the user message with matching tool_result. They form a pair.
+                        if i + 1 < conversationHistory.count {
+                            let nextMessage = conversationHistory[i + 1]
+                            let nextRole = nextMessage["role"] as? String ?? ""
+                            if nextRole == "user" {
+                                cycleStartIndices.append(i)
+                                cycleLengths.append(2)
+                                i += 2
+                                continue
+                            }
+                        }
+                        // Edge case: tool_use at the very end with no tool_result yet.
+                        // Treat as single-message cycle (already broken state).
+                        cycleStartIndices.append(i)
+                        cycleLengths.append(1)
+                        i += 1
+                    } else {
+                        // Assistant message without tool_use — standalone cycle
+                        cycleStartIndices.append(i)
+                        cycleLengths.append(1)
+                        i += 1
+                    }
+                } else {
+                    // User message not already paired with a preceding tool_use
+                    cycleStartIndices.append(i)
+                    cycleLengths.append(1)
+                    i += 1
+                }
+            }
+
+            // Determine how many cycles to remove from the OLDEST end (front of cycles array)
+            // to bring the total message count at or below maxConversationMessages.
+            // Always preserve the last few cycles (most recent context).
             let excess = conversationHistory.count - maxConversationMessages
-            // Only preserve message[0] (initial user prompt).
-            // Do NOT preserve message[1] — if it's an assistant message with tool_use,
-            // evicting message[2] (tool_result) creates an invalid conversation.
-            let preserveCount = 1
-            let maxRemovable = max(0, conversationHistory.count - preserveCount - 1)
-            let toRemove = min(excess, maxRemovable)
-            if toRemove > 0 {
-                conversationHistory.removeSubrange(preserveCount..<(preserveCount + toRemove))
-                NSLog("CyclopOne [AgentLoop]: Evicted %d oldest messages, history now %d messages",
-                      toRemove, conversationHistory.count)
+            var messagesToEvict = 0
+            var cyclesToEvict = 0
+
+            for c in 0..<cycleStartIndices.count {
+                if messagesToEvict >= excess { break }
+                // Don't evict cycles too close to the end — keep recent context.
+                // Ensure at least half of maxConversationMessages remain after message[0].
+                let remainingAfterEvict = conversationHistory.count - 1 - (messagesToEvict + cycleLengths[c])
+                if remainingAfterEvict < maxConversationMessages / 2 { break }
+
+                messagesToEvict += cycleLengths[c]
+                cyclesToEvict += 1
+            }
+
+            if messagesToEvict > 0 && cyclesToEvict > 0 {
+                // All cycles to evict are contiguous starting at index 1
+                let removeStart = cycleStartIndices[0]
+                conversationHistory.removeSubrange(removeStart..<(removeStart + messagesToEvict))
+                NSLog("CyclopOne [AgentLoop]: Evicted %d messages (%d complete cycles), history now %d messages",
+                      messagesToEvict, cyclesToEvict, conversationHistory.count)
             }
         }
 
-        // Always clean up orphans in BOTH directions.
+        // Safety net: clean up any orphans that may exist from earlier bugs or edge cases.
         removeOrphanedToolResults()
         removeOrphanedToolUses()
 
@@ -818,114 +1183,268 @@ actor AgentLoop {
         }
     }
 
-    /// Remove orphaned tool_result blocks from conversation history.
-    /// A tool_result is orphaned if its tool_use_id doesn't match any tool_use
-    /// block in a preceding assistant message. The Claude API rejects these.
+    /// Remove mismatched tool_use / tool_result cycles from conversation history.
+    ///
+    /// The Claude API enforces strict pairing: every tool_use block in an assistant
+    /// message at index `i` must have a matching tool_result (by ID) in the
+    /// immediately following user message at index `i+1`, and vice versa. The sets
+    /// of IDs must be identical.
+    ///
+    /// After pruning evicts messages from the middle of the history, these pairs
+    /// can become broken. This method detects any broken cycle and removes both
+    /// the assistant and user messages involved. Because removing a cycle shifts
+    /// subsequent indices and can create new mismatches (e.g. an unrelated user
+    /// message with tool_results now sits after a plain assistant message), the
+    /// scan repeats until a full pass finds no violations.
     private func removeOrphanedToolResults() {
-        // Collect all tool_use IDs from assistant messages
-        var validToolUseIDs = Set<String>()
+        var totalRemoved = 0
+
+        // Iterate until stable -- each removal pass can expose new mismatches.
+        while true {
+            var indicesToRemove = Set<Int>()
+
+            var i = 0
+            while i < conversationHistory.count {
+                let message = conversationHistory[i]
+                guard let role = message["role"] as? String else { i += 1; continue }
+
+                if role == "assistant" {
+                    let toolUseIDs = extractToolUseIDs(from: message)
+                    if toolUseIDs.isEmpty { i += 1; continue }
+
+                    // An assistant message with tool_use MUST be followed by a user
+                    // message whose tool_result IDs exactly match.
+                    let nextIndex = i + 1
+                    var matched = false
+                    if nextIndex < conversationHistory.count {
+                        let nextMessage = conversationHistory[nextIndex]
+                        let nextRole = nextMessage["role"] as? String ?? ""
+                        let toolResultIDs = extractToolResultIDs(from: nextMessage)
+                        if nextRole == "user" && toolUseIDs == toolResultIDs {
+                            matched = true
+                        }
+                    }
+
+                    if !matched {
+                        indicesToRemove.insert(i)
+                        // If the next message is a user message with tool_results that
+                        // don't match, it is also orphaned -- remove it too.
+                        if nextIndex < conversationHistory.count {
+                            let nextMessage = conversationHistory[nextIndex]
+                            let nextRole = nextMessage["role"] as? String ?? ""
+                            if nextRole == "user" && !extractToolResultIDs(from: nextMessage).isEmpty {
+                                indicesToRemove.insert(nextIndex)
+                            }
+                        }
+                    }
+                } else if role == "user" {
+                    let toolResultIDs = extractToolResultIDs(from: message)
+                    if toolResultIDs.isEmpty { i += 1; continue }
+
+                    // A user message with tool_results MUST be preceded by an assistant
+                    // message whose tool_use IDs exactly match.
+                    let prevIndex = i - 1
+                    var matched = false
+                    if prevIndex >= 0 {
+                        let prevMessage = conversationHistory[prevIndex]
+                        let prevRole = prevMessage["role"] as? String ?? ""
+                        let toolUseIDs = extractToolUseIDs(from: prevMessage)
+                        if prevRole == "assistant" && toolUseIDs == toolResultIDs {
+                            matched = true
+                        }
+                    }
+
+                    if !matched {
+                        indicesToRemove.insert(i)
+                        // If the preceding message is an assistant with tool_uses that
+                        // don't match, it is also orphaned -- remove it too.
+                        if prevIndex >= 0 {
+                            let prevMessage = conversationHistory[prevIndex]
+                            let prevRole = prevMessage["role"] as? String ?? ""
+                            if prevRole == "assistant" && !extractToolUseIDs(from: prevMessage).isEmpty {
+                                indicesToRemove.insert(prevIndex)
+                            }
+                        }
+                    }
+                }
+
+                i += 1
+            }
+
+            if indicesToRemove.isEmpty { break }
+
+            // Remove in reverse index order to keep lower indices stable.
+            for idx in indicesToRemove.sorted(by: >) {
+                conversationHistory.remove(at: idx)
+            }
+            totalRemoved += indicesToRemove.count
+        }
+
+        if totalRemoved > 0 {
+            NSLog("CyclopOne [AgentLoop]: Removed %d messages with mismatched tool_use/tool_result cycles", totalRemoved)
+        }
+    }
+
+    /// Remove assistant messages with orphaned tool_use blocks.
+    ///
+    /// NOTE: All orphan cleanup is now handled by `removeOrphanedToolResults()`,
+    /// which validates complete cycles in both directions and iterates until
+    /// stable. This method is kept to preserve the call-site contract in
+    /// `pruneConversationHistory()`.
+    private func removeOrphanedToolUses() {
+        // Intentionally empty -- removeOrphanedToolResults() handles both
+        // directions (tool_use -> tool_result and tool_result -> tool_use)
+        // and iterates until no mismatches remain.
+    }
+
+    /// Extract the set of tool_use IDs from an assistant message's content blocks.
+    private func extractToolUseIDs(from message: [String: Any]) -> Set<String> {
+        guard let content = message["content"] as? [[String: Any]] else { return [] }
+        var ids = Set<String>()
+        for block in content {
+            if let type = block["type"] as? String, type == "tool_use",
+               let id = block["id"] as? String {
+                ids.insert(id)
+            }
+        }
+        return ids
+    }
+
+    /// Extract the set of tool_use_id references from tool_result blocks in a user message.
+    private func extractToolResultIDs(from message: [String: Any]) -> Set<String> {
+        guard let content = message["content"] as? [[String: Any]] else { return [] }
+        var ids = Set<String>()
+        for block in content {
+            if let type = block["type"] as? String, type == "tool_result",
+               let toolUseId = block["tool_use_id"] as? String {
+                ids.insert(toolUseId)
+            }
+        }
+        return ids
+    }
+
+    /// Validate that every tool_use block has a matching tool_result and vice versa.
+    ///
+    /// Conversation history can become corrupted when pruning evicts one half of a
+    /// tool_use / tool_result pair. The Claude API rejects such payloads. This method
+    /// scans the full history, identifies mismatched pairs, removes the orphaned
+    /// messages, and logs a warning.
+    ///
+    /// - Returns: `true` if the history was already valid; `false` if repairs were needed.
+    @discardableResult
+    func validateConversationHistory() -> Bool {
+        // 1. Collect all tool_use IDs from assistant messages.
+        var toolUseIDs = Set<String>()
         for message in conversationHistory {
             guard let role = message["role"] as? String, role == "assistant" else { continue }
             guard let content = message["content"] as? [[String: Any]] else { continue }
             for block in content {
                 if let type = block["type"] as? String, type == "tool_use",
                    let id = block["id"] as? String {
-                    validToolUseIDs.insert(id)
+                    toolUseIDs.insert(id)
                 }
             }
         }
 
-        // Find and remove messages that contain only orphaned tool_results
-        var indicesToRemove: [Int] = []
-        for (i, message) in conversationHistory.enumerated() {
-            guard let role = message["role"] as? String, role == "user" else { continue }
-            guard let content = message["content"] as? [[String: Any]] else { continue }
-
-            // Check if ALL content blocks are orphaned tool_results
-            let hasToolResults = content.contains { ($0["type"] as? String) == "tool_result" }
-            guard hasToolResults else { continue }
-
-            let allOrphaned = content.allSatisfy { block in
-                guard let type = block["type"] as? String, type == "tool_result" else {
-                    return false  // Non-tool_result blocks are fine
-                }
-                let toolUseId = block["tool_use_id"] as? String ?? ""
-                return !validToolUseIDs.contains(toolUseId)
-            }
-
-            if allOrphaned {
-                indicesToRemove.append(i)
-            } else {
-                // Filter out just the orphaned blocks, keep valid ones
-                let filtered = content.filter { block in
-                    guard let type = block["type"] as? String, type == "tool_result" else { return true }
-                    let toolUseId = block["tool_use_id"] as? String ?? ""
-                    return validToolUseIDs.contains(toolUseId)
-                }
-                if filtered.count < content.count {
-                    var modified = message
-                    modified["content"] = filtered
-                    conversationHistory[i] = modified
-                }
-            }
-        }
-
-        // Remove fully orphaned messages in reverse order
-        for i in indicesToRemove.reversed() {
-            conversationHistory.remove(at: i)
-        }
-
-        if !indicesToRemove.isEmpty {
-            NSLog("CyclopOne [AgentLoop]: Removed %d orphaned tool_result messages", indicesToRemove.count)
-        }
-    }
-
-    /// Remove assistant messages that contain tool_use blocks without matching
-    /// tool_result blocks in the subsequent conversation. The Claude API requires
-    /// every tool_use to be followed by a corresponding tool_result.
-    private func removeOrphanedToolUses() {
-        // Collect all tool_result IDs from user messages
-        var validToolResultIDs = Set<String>()
+        // 2. Collect all tool_result tool_use_ids from user messages.
+        var toolResultIDs = Set<String>()
         for message in conversationHistory {
             guard let role = message["role"] as? String, role == "user" else { continue }
             guard let content = message["content"] as? [[String: Any]] else { continue }
             for block in content {
                 if let type = block["type"] as? String, type == "tool_result",
                    let toolUseId = block["tool_use_id"] as? String {
-                    validToolResultIDs.insert(toolUseId)
+                    toolResultIDs.insert(toolUseId)
                 }
             }
         }
 
-        // Find assistant messages with orphaned tool_use blocks
-        var indicesToRemove: [Int] = []
+        // 3. Find mismatches in both directions.
+        let toolUsesWithoutResults = toolUseIDs.subtracting(toolResultIDs)
+        let toolResultsWithoutUses = toolResultIDs.subtracting(toolUseIDs)
+
+        // If everything matches, history is valid.
+        if toolUsesWithoutResults.isEmpty && toolResultsWithoutUses.isEmpty {
+            return true
+        }
+
+        // 4. Log warnings for each mismatch.
+        if !toolUsesWithoutResults.isEmpty {
+            NSLog("CyclopOne [validateConversationHistory]: WARNING — %d tool_use blocks without matching tool_result: %@",
+                  toolUsesWithoutResults.count,
+                  toolUsesWithoutResults.sorted().joined(separator: ", "))
+        }
+        if !toolResultsWithoutUses.isEmpty {
+            NSLog("CyclopOne [validateConversationHistory]: WARNING — %d tool_result blocks without matching tool_use: %@",
+                  toolResultsWithoutUses.count,
+                  toolResultsWithoutUses.sorted().joined(separator: ", "))
+        }
+
+        // 5a. Remove assistant messages that contain any orphaned tool_use.
+        //     We must remove the entire message because partial tool_use removal
+        //     can leave the message in an inconsistent state.
+        var assistantIndicesToRemove: [Int] = []
         for (i, message) in conversationHistory.enumerated() {
             guard let role = message["role"] as? String, role == "assistant" else { continue }
             guard let content = message["content"] as? [[String: Any]] else { continue }
-
-            let toolUseBlocks = content.filter { ($0["type"] as? String) == "tool_use" }
-            guard !toolUseBlocks.isEmpty else { continue }
-
-            // Check if ALL tool_use blocks in this message have matching tool_results
-            let hasOrphanedToolUse = toolUseBlocks.contains { block in
-                let id = block["id"] as? String ?? ""
-                return !validToolResultIDs.contains(id)
+            let hasOrphaned = content.contains { block in
+                guard let type = block["type"] as? String, type == "tool_use",
+                      let id = block["id"] as? String else { return false }
+                return toolUsesWithoutResults.contains(id)
             }
-
-            if hasOrphanedToolUse {
-                // Remove the entire assistant message — partial tool_use removal
-                // is complex and the API requires all tool_uses to have results.
-                indicesToRemove.append(i)
+            if hasOrphaned {
+                assistantIndicesToRemove.append(i)
             }
         }
 
-        for i in indicesToRemove.reversed() {
+        // 5b. Remove user messages (or filter blocks) for orphaned tool_results.
+        var userIndicesToRemove: [Int] = []
+        for (i, message) in conversationHistory.enumerated() {
+            guard let role = message["role"] as? String, role == "user" else { continue }
+            guard let content = message["content"] as? [[String: Any]] else { continue }
+
+            let hasOrphanedResults = content.contains { block in
+                guard let type = block["type"] as? String, type == "tool_result",
+                      let toolUseId = block["tool_use_id"] as? String else { return false }
+                return toolResultsWithoutUses.contains(toolUseId)
+            }
+            guard hasOrphanedResults else { continue }
+
+            // Check if ALL blocks are orphaned tool_results — if so, remove entire message.
+            let allOrphaned = content.allSatisfy { block in
+                guard let type = block["type"] as? String, type == "tool_result",
+                      let toolUseId = block["tool_use_id"] as? String else { return false }
+                return toolResultsWithoutUses.contains(toolUseId)
+            }
+
+            if allOrphaned {
+                userIndicesToRemove.append(i)
+            } else {
+                // Filter out only the orphaned tool_result blocks, keep the rest.
+                let filtered = content.filter { block in
+                    guard let type = block["type"] as? String, type == "tool_result",
+                          let toolUseId = block["tool_use_id"] as? String else { return true }
+                    return !toolResultsWithoutUses.contains(toolUseId)
+                }
+                var modified = message
+                modified["content"] = filtered
+                conversationHistory[i] = modified
+            }
+        }
+
+        // Remove fully orphaned messages in reverse index order to preserve indices.
+        let allIndicesToRemove = Set(assistantIndicesToRemove).union(Set(userIndicesToRemove))
+        for i in allIndicesToRemove.sorted().reversed() {
             conversationHistory.remove(at: i)
         }
 
-        if !indicesToRemove.isEmpty {
-            NSLog("CyclopOne [AgentLoop]: Removed %d assistant messages with orphaned tool_use blocks", indicesToRemove.count)
+        let totalRemoved = allIndicesToRemove.count
+        if totalRemoved > 0 {
+            NSLog("CyclopOne [validateConversationHistory]: Removed %d messages with broken tool pairs, history now %d messages",
+                  totalRemoved, conversationHistory.count)
         }
+
+        return false
     }
 
     /// Check if a conversation message contains image content (base64 screenshot data).
@@ -1023,6 +1542,13 @@ actor AgentLoop {
         self.memoryContext = context
     }
 
+    /// Set the current step instruction for this run.
+    /// Called by the Orchestrator at the start of each plan step.
+    /// Replaces the old `setBrainPlan()` method.
+    func setCurrentStepInstruction(_ instruction: String) {
+        self.currentStepInstruction = instruction
+    }
+
     /// Sprint 16: Restore conversation history from a replayed run state.
     ///
     /// Called by `Orchestrator.resumeRun(runId:)` to set up the agent's
@@ -1046,6 +1572,7 @@ actor AgentLoop {
         self.completionToken = completionToken
         consecutiveAPIFailures = 0
         iterationCount = 0  // Reset so prepareRun's work isn't wasted
+        recentToolCallFingerprints.removeAll()
         latestScreenshot = screenshot
 
         // Build the initial user message with the fresh screenshot
@@ -1154,6 +1681,80 @@ actor AgentLoop {
         if let pid = newPID { targetAppPID = pid }
     }
 
+    // MARK: - M5: Safety Gate Interface
+
+    func startSafetyGateRun(runId: String) async {
+        await safetyGate.startRun(runId: runId)
+    }
+
+    func endSafetyGateRun() async {
+        await safetyGate.endRun()
+    }
+
+    /// Build the ActionContext from current system state.
+    private func gatherActionContext() async -> ActionSafetyGate.ActionContext {
+        let appInfo = await MainActor.run { [targetAppPID] () -> (name: String?, bundleID: String?) in
+            guard let pid = targetAppPID,
+                  let app = NSRunningApplication(processIdentifier: pid) else {
+                return (nil, nil)
+            }
+            return (app.localizedName, app.bundleIdentifier)
+        }
+
+        let focusInfo = await MainActor.run { [targetAppPID, accessibility] () -> (role: String, label: String)? in
+            return accessibility.getFocusedElementInfo(targetPID: targetAppPID)
+        }
+
+        let windowTitle = await MainActor.run { [targetAppPID, accessibility] () -> String? in
+            return accessibility.getWindowTitle(targetPID: targetAppPID)
+        }
+
+        let currentURL: String?
+        if let bundleID = appInfo.bundleID,
+           ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
+            "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser"]
+            .contains(bundleID) {
+            currentURL = await MainActor.run { [targetAppPID, accessibility] () -> String? in
+                return accessibility.getBrowserURL(targetPID: targetAppPID)
+            }
+        } else {
+            currentURL = nil
+        }
+
+        return ActionSafetyGate.ActionContext(
+            activeAppName: appInfo.name,
+            activeAppBundleID: appInfo.bundleID,
+            windowTitle: windowTitle,
+            focusedElementRole: focusInfo?.role,
+            focusedElementLabel: focusInfo?.label,
+            recentToolCalls: Array(recentToolCallHistory.suffix(3)),
+            currentURL: currentURL
+        )
+    }
+
+    // MARK: - Observer Helpers
+
+    /// Execute an observer callback with a timeout. If the observer call takes
+    /// longer than `timeout` seconds, it is cancelled and a warning is logged.
+    /// This prevents slow network I/O (e.g. Telegram API) from stalling the agent loop.
+    private static func fireAndForgetObserver(
+        timeout: TimeInterval,
+        body: @Sendable @escaping () async -> Void
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await body()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            }
+            // Wait for whichever finishes first
+            await group.next()
+            // Cancel the other
+            group.cancelAll()
+        }
+    }
+
     // MARK: - Tool Execution
 
     private func executeToolCall(
@@ -1164,20 +1765,68 @@ actor AgentLoop {
         onConfirmationNeeded: @Sendable @escaping (String) async -> Bool
     ) async -> ToolResult {
 
+        // M6: Early cancellation check
+        guard !Task.isCancelled else {
+            return ToolResult(result: "Cancelled", isError: false)
+        }
+
         onStateChange(.executing(name))
 
+        // ── M5: Safety Gate ──
+        if config.confirmDestructiveActions {
+            let context = await gatherActionContext()
+            let stringInput = input.reduce(into: [String: String]()) { result, pair in
+                if let str = pair.value as? String {
+                    result[pair.key] = str
+                } else if let num = pair.value as? NSNumber {
+                    result[pair.key] = num.stringValue
+                } else {
+                    result[pair.key] = String(describing: pair.value)
+                }
+            }
+            let toolCall = ActionSafetyGate.ToolCall(
+                name: name,
+                input: stringInput,
+                iteration: iterationCount,
+                stepInstruction: currentStepInstruction.isEmpty ? nil : currentStepInstruction
+            )
+            let verdict = await safetyGate.evaluate(toolCall: toolCall, context: context)
+
+            switch verdict.level {
+            case .safe:
+                break
+
+            case .moderate:
+                NSLog("CyclopOne [SafetyGate]: MODERATE -- %@ -- %@", name, verdict.reason)
+
+            case .high:
+                onStateChange(.awaitingConfirmation(verdict.reason))
+                let approved = await onConfirmationNeeded(verdict.approvalPrompt ?? "Approve \(name)?")
+                if !approved {
+                    await safetyGate.recordSessionApproval("denied:\(name)", approved: false)
+                    return ToolResult(result: "Action denied by user: \(verdict.reason)", isError: false)
+                }
+                if let cacheKey = verdict.sessionCacheKey {
+                    await safetyGate.recordSessionApproval(cacheKey, approved: true)
+                }
+
+            case .critical:
+                onStateChange(.awaitingConfirmation("CRITICAL: \(verdict.reason)"))
+                let approved = await onConfirmationNeeded(
+                    verdict.approvalPrompt ?? "CRITICAL ACTION: \(name)\n\n\(verdict.reason)"
+                )
+                if !approved {
+                    return ToolResult(result: "Critical action denied by user: \(verdict.reason)", isError: false)
+                }
+            }
+        }
+
+        // ── Proceed to tool execution ──
         switch name {
 
         case "run_shell_command":
             guard let command = input["command"] as? String else {
                 return ToolResult(result: "Error: missing 'command'", isError: true)
-            }
-            if config.confirmDestructiveActions && config.isDestructive(command) {
-                onStateChange(.awaitingConfirmation(command))
-                let approved = await onConfirmationNeeded("Run destructive command?\n\n\(command)")
-                if !approved {
-                    return ToolResult(result: "User denied.", isError: false)
-                }
             }
             do {
                 let result = try await executor.runShellCommand(command, timeout: config.shellTimeout)
@@ -1667,6 +2316,16 @@ struct ToolResult {
     var screenshot: ScreenCapture? = nil
 }
 
+// MARK: - Tool Call Summary
+
+/// Summary of a single tool call's outcome, used by VerificationEngine
+/// to detect tool errors that the screenshot alone cannot reveal.
+struct ToolCallSummary: Sendable {
+    let toolName: String
+    let resultText: String
+    let isError: Bool
+}
+
 // MARK: - Iteration Result
 
 /// Result of a single agent iteration (one Claude API call + tool execution).
@@ -1691,4 +2350,8 @@ struct IterationResult {
     /// Whether any tool calls in this iteration produce visual changes on screen.
     /// False when only non-visual tools (memory, vault, task) were called.
     let hasVisualToolCalls: Bool
+
+    /// Summary of all tool calls executed in this iteration, including error status.
+    /// Used by VerificationEngine to penalize scores when tools report errors.
+    let toolCallSummaries: [ToolCallSummary]
 }

@@ -129,7 +129,14 @@ actor PluginLoader {
                 continue
             }
 
-            guard let manifest = parseManifest(at: manifestURL, directoryURL: dirURL) else {
+            let manifestResult = parseManifest(at: manifestURL, directoryURL: dirURL)
+            let manifest: PluginManifest
+            switch manifestResult {
+            case .success(let parsed):
+                manifest = parsed
+            case .failure(let validationError):
+                logger.error("Rejected plugin '\(dirURL.lastPathComponent)': \(validationError.localizedDescription)")
+                NSLog("CyclopOne [PluginLoader]: Rejected plugin '%@': %@", dirURL.lastPathComponent, validationError.localizedDescription)
                 continue
             }
 
@@ -458,7 +465,15 @@ actor PluginLoader {
             }
             let manifestURL = dirURL.appendingPathComponent("plugin.json")
             guard fm.fileExists(atPath: manifestURL.path) else { continue }
-            guard let manifest = parseManifest(at: manifestURL, directoryURL: dirURL) else { continue }
+            let manifestResult = parseManifest(at: manifestURL, directoryURL: dirURL)
+            let manifest: PluginManifest
+            switch manifestResult {
+            case .success(let parsed):
+                manifest = parsed
+            case .failure(let validationError):
+                logger.warning("Cannot list plugin '\(dirURL.lastPathComponent)': \(validationError.localizedDescription)")
+                continue
+            }
 
             let isApproved = approved.contains(manifest.name)
             let isEnabled = isApproved && !disabled.contains(manifest.name)
@@ -485,45 +500,71 @@ actor PluginLoader {
 
     // MARK: - Private: Manifest Parsing
 
-    /// Parse a plugin.json manifest file using JSONSerialization.
-    private func parseManifest(at url: URL, directoryURL: URL) -> PluginManifest? {
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            logger.error("Failed to parse plugin.json at \(url.path)")
-            return nil
+    /// Parse and validate a plugin.json manifest file using JSONSerialization.
+    ///
+    /// Returns a `Result` with the parsed manifest on success, or a detailed
+    /// `PluginValidationError` on failure. Validates:
+    /// - JSON structure and required fields (name, version, description, entrypoint)
+    /// - Entrypoint must be a relative path with no path traversal (`..`)
+    /// - All tools must have non-empty `input_schema` with `"type": "object"`
+    private func parseManifest(at url: URL, directoryURL: URL) -> Result<PluginManifest, PluginValidationError> {
+        let path = url.path
+
+        // Read and parse JSON
+        guard let data = try? Data(contentsOf: url) else {
+            return .failure(.unreadableManifest(path: path))
         }
 
-        guard let name = json["name"] as? String,
-              let version = json["version"] as? String,
-              let description = json["description"] as? String,
-              let entrypoint = json["entrypoint"] as? String else {
-            logger.error("plugin.json missing required fields at \(url.path)")
-            return nil
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .failure(.invalidJSON(path: path))
+        }
+
+        // Validate required fields
+        guard let name = json["name"] as? String, !name.isEmpty else {
+            return .failure(.missingRequiredField(field: "name", path: path))
+        }
+        guard let version = json["version"] as? String, !version.isEmpty else {
+            return .failure(.missingRequiredField(field: "version", path: path))
+        }
+        guard let description = json["description"] as? String, !description.isEmpty else {
+            return .failure(.missingRequiredField(field: "description", path: path))
+        }
+        guard let entrypoint = json["entrypoint"] as? String, !entrypoint.isEmpty else {
+            return .failure(.missingRequiredField(field: "entrypoint", path: path))
+        }
+
+        // Validate entrypoint is a relative path (no leading /)
+        if entrypoint.hasPrefix("/") {
+            return .failure(.absoluteEntrypoint(entrypoint: entrypoint, path: path))
+        }
+
+        // Validate entrypoint has no path traversal components
+        let entrypointComponents = entrypoint.components(separatedBy: "/")
+        if entrypointComponents.contains("..") {
+            return .failure(.entrypointPathTraversal(entrypoint: entrypoint, path: path))
         }
 
         let author = json["author"] as? String
         let permissions = json["permissions"] as? [String] ?? []
 
-        // Parse tools array
+        // Parse and validate tools array
         var toolDefs: [PluginToolDef] = []
         if let toolsArray = json["tools"] as? [[String: Any]] {
-            for toolJSON in toolsArray {
-                guard let toolName = toolJSON["name"] as? String,
-                      let toolDesc = toolJSON["description"] as? String else {
-                    logger.warning("Skipping tool with missing name/description in plugin '\(name)'")
-                    continue
+            for (index, toolJSON) in toolsArray.enumerated() {
+                guard let toolName = toolJSON["name"] as? String, !toolName.isEmpty,
+                      let toolDesc = toolJSON["description"] as? String, !toolDesc.isEmpty else {
+                    return .failure(.toolMissingFields(toolIndex: index, path: path))
                 }
 
-                // input_schema is arbitrary JSON — store as [String: Any]
-                let inputSchema: [String: Any]
-                if let schema = toolJSON["input_schema"] as? [String: Any] {
-                    inputSchema = schema
-                } else {
-                    // Default to an empty object schema if none provided
-                    inputSchema = [
-                        "type": "object",
-                        "properties": [:] as [String: Any]
-                    ]
+                // input_schema is required and must have type: "object"
+                guard let inputSchema = toolJSON["input_schema"] as? [String: Any],
+                      !inputSchema.isEmpty else {
+                    return .failure(.toolEmptyInputSchema(toolName: toolName, path: path))
+                }
+
+                guard let schemaType = inputSchema["type"] as? String,
+                      schemaType == "object" else {
+                    return .failure(.toolInputSchemaMissingObjectType(toolName: toolName, path: path))
                 }
 
                 let toolDef = PluginToolDef(
@@ -536,7 +577,7 @@ actor PluginLoader {
             }
         }
 
-        return PluginManifest(
+        let manifest = PluginManifest(
             name: name,
             version: version,
             description: description,
@@ -547,6 +588,8 @@ actor PluginLoader {
             isEnabled: true,
             directoryURL: directoryURL
         )
+
+        return .success(manifest)
     }
 
     // MARK: - Private: Directory Setup
@@ -583,6 +626,41 @@ actor PluginLoader {
 
     private func saveApprovedPluginNames(_ names: Set<String>) {
         UserDefaults.standard.set(Array(names), forKey: approvedPluginsKey)
+    }
+}
+
+// MARK: - Plugin Validation Errors
+
+/// Errors encountered during plugin manifest parsing and validation.
+enum PluginValidationError: LocalizedError {
+    case unreadableManifest(path: String)
+    case invalidJSON(path: String)
+    case missingRequiredField(field: String, path: String)
+    case absoluteEntrypoint(entrypoint: String, path: String)
+    case entrypointPathTraversal(entrypoint: String, path: String)
+    case toolMissingFields(toolIndex: Int, path: String)
+    case toolEmptyInputSchema(toolName: String, path: String)
+    case toolInputSchemaMissingObjectType(toolName: String, path: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadableManifest(let path):
+            return "Cannot read plugin manifest at \(path)"
+        case .invalidJSON(let path):
+            return "plugin.json is not valid JSON at \(path)"
+        case .missingRequiredField(let field, let path):
+            return "plugin.json missing required field '\(field)' at \(path)"
+        case .absoluteEntrypoint(let entrypoint, let path):
+            return "Plugin entrypoint '\(entrypoint)' must be a relative path at \(path)"
+        case .entrypointPathTraversal(let entrypoint, let path):
+            return "Plugin entrypoint '\(entrypoint)' contains path traversal at \(path)"
+        case .toolMissingFields(let toolIndex, let path):
+            return "Tool at index \(toolIndex) missing name or description at \(path)"
+        case .toolEmptyInputSchema(let toolName, let path):
+            return "Tool '\(toolName)' has an empty input_schema at \(path)"
+        case .toolInputSchemaMissingObjectType(let toolName, let path):
+            return "Tool '\(toolName)' input_schema must have \"type\": \"object\" at \(path)"
+        }
     }
 }
 

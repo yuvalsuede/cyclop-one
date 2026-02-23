@@ -87,6 +87,7 @@ actor VerificationEngine {
     ///   - textContent: Text output from Claude's response / tool results in this iteration.
     ///   - postScreenshot: Screenshot captured after the action (may be nil).
     ///   - preScreenshot: Screenshot captured before the action (may be nil).
+    ///   - toolResults: Summaries of tool calls executed in this iteration, including error status.
     ///   - threshold: Minimum overall score to pass (default 60).
     /// - Returns: A `VerificationScore` with score and reason.
     func verify(
@@ -94,6 +95,7 @@ actor VerificationEngine {
         textContent: String,
         postScreenshot: ScreenCapture?,
         preScreenshot: ScreenCapture?,
+        toolResults: [ToolCallSummary] = [],
         threshold: Int = VerificationScore.defaultThreshold
     ) async -> VerificationScore {
 
@@ -109,9 +111,26 @@ actor VerificationEngine {
             )
         }
 
-        NSLog("CyclopOne [Verification]: LLM verify starting — promptLen=%d, screenshotSize=%d bytes, mediaType=%@, threshold=%d",
+        // Analyze tool errors for both LLM prompt and score adjustment
+        let toolErrors = toolResults.filter { $0.isError }
+        let toolErrorCount = toolErrors.count
+        let totalToolCalls = toolResults.count
+
+        NSLog("CyclopOne [Verification]: LLM verify starting — promptLen=%d, screenshotSize=%d bytes, mediaType=%@, threshold=%d, toolErrors=%d/%d",
               command.count, screenshotData.count,
-              postScreenshot?.mediaType ?? "unknown", threshold)
+              postScreenshot?.mediaType ?? "unknown", threshold, toolErrorCount, totalToolCalls)
+
+        // Build tool error context for the LLM prompt
+        var toolErrorContext = ""
+        if toolErrorCount > 0 {
+            let errorDetails = toolErrors.prefix(5).map { "- \($0.toolName): \($0.resultText.prefix(200))" }.joined(separator: "\n")
+            toolErrorContext = """
+
+            IMPORTANT: \(toolErrorCount) of \(totalToolCalls) tool calls returned errors:
+            \(errorDetails)
+            Factor these tool errors into your score. A task cannot be "complete" if critical tools failed.
+            """
+        }
 
         let prompt = """
         You are a verification agent. The user asked: "\(command)"
@@ -119,6 +138,7 @@ actor VerificationEngine {
         Look at the current screenshot and assess:
         1. Has the requested action been completed?
         2. Is the screen in the expected state?
+        \(toolErrorContext)
 
         Score 0-100 where:
         - 100 = fully complete, screen shows expected result
@@ -141,7 +161,19 @@ actor VerificationEngine {
                   response.count, String(response.prefix(300)))
 
             // Parse JSON response from the LLM
-            let (score, reason) = parseVerificationResponse(response)
+            var (score, reason) = parseVerificationResponse(response)
+
+            // Apply tool error penalty: even if the screenshot looks fine,
+            // tool errors indicate the underlying action may have failed.
+            // Penalty: -20 per errored tool, capped so score doesn't go below 5.
+            if toolErrorCount > 0 {
+                let penalty = min(toolErrorCount * 20, score - 5)
+                let adjustedScore = max(5, score - penalty)
+                NSLog("CyclopOne [Verification]: Tool error penalty applied — original=%d, penalty=%d, adjusted=%d (errors=%d)",
+                      score, penalty, adjustedScore, toolErrorCount)
+                reason += " [tool error penalty: -\(penalty) for \(toolErrorCount) error(s)]"
+                score = adjustedScore
+            }
 
             NSLog("CyclopOne [Verification]: LLM score=%d, reason=%@", score, reason)
 
@@ -152,7 +184,8 @@ actor VerificationEngine {
                     "method": "llm_vision",
                     "raw_response": String(response.prefix(500)),
                     "threshold": "\(threshold)",
-                    "command": command
+                    "command": command,
+                    "tool_errors": "\(toolErrorCount)/\(totalToolCalls)"
                 ],
                 passed: score >= threshold,
                 reason: reason
@@ -165,6 +198,7 @@ actor VerificationEngine {
                 textContent: textContent,
                 postScreenshot: postScreenshot,
                 preScreenshot: preScreenshot,
+                toolResults: toolResults,
                 threshold: threshold
             )
         }
@@ -211,12 +245,14 @@ actor VerificationEngine {
     // MARK: - Heuristic Fallback
 
     /// Heuristic-based verification used when the LLM call fails.
-    /// Uses pixel diff, accessibility tree checks, and keyword matching.
+    /// Uses pixel diff, accessibility tree checks, keyword matching,
+    /// and tool error analysis.
     private func fallbackVerify(
         command: String,
         textContent: String,
         postScreenshot: ScreenCapture?,
         preScreenshot: ScreenCapture?,
+        toolResults: [ToolCallSummary] = [],
         threshold: Int = VerificationScore.defaultThreshold
     ) async -> VerificationScore {
 
@@ -226,7 +262,7 @@ actor VerificationEngine {
             command: command
         )
         let structural = await computeStructuralScore(command: command)
-        let output = computeOutputScore(textContent: textContent)
+        let output = computeOutputScore(textContent: textContent, toolResults: toolResults)
 
         NSLog("CyclopOne [Verification]: Heuristic scores — visual=%d, structural=%d, output=%d (weights: %.2f/%.2f/%.2f)",
               visual, structural, output, weights.visual, weights.structural, weights.output)
@@ -236,6 +272,7 @@ actor VerificationEngine {
             + Double(output) * weights.output
         let overall = min(100, max(0, Int(compositeRaw.rounded())))
 
+        let toolErrorCount = toolResults.filter { $0.isError }.count
         let breakdown: [String: String] = [
             "method": "heuristic_fallback",
             "visual_score": "\(visual)",
@@ -245,8 +282,13 @@ actor VerificationEngine {
             "structural_weight": "\(weights.structural)",
             "output_weight": "\(weights.output)",
             "threshold": "\(threshold)",
-            "command": command
+            "command": command,
+            "tool_errors": "\(toolErrorCount)/\(toolResults.count)"
         ]
+
+        let reason = toolErrorCount > 0
+            ? "Heuristic fallback (LLM unavailable) — \(toolErrorCount) tool error(s) detected"
+            : "Heuristic fallback (LLM unavailable)"
 
         return VerificationScore(
             overall: overall,
@@ -255,7 +297,7 @@ actor VerificationEngine {
             outputScore: output,
             breakdown: breakdown,
             passed: overall >= threshold,
-            reason: "Heuristic fallback (LLM unavailable)"
+            reason: reason
         )
     }
 
@@ -557,7 +599,20 @@ actor VerificationEngine {
     /// Uses whole-word matching to avoid substring false positives.
     ///
     /// Returns a score 0-100.
-    private func computeOutputScore(textContent: String) -> Int {
+    private func computeOutputScore(textContent: String, toolResults: [ToolCallSummary] = []) -> Int {
+        // If there are tool execution errors, penalize significantly
+        let toolErrors = toolResults.filter { $0.isError }
+        if !toolErrors.isEmpty {
+            let errorRatio = Double(toolErrors.count) / Double(max(toolResults.count, 1))
+            if errorRatio >= 0.5 {
+                NSLog("CyclopOne [Verification]: %d/%d tools errored — heavy penalty", toolErrors.count, toolResults.count)
+                return 15
+            } else {
+                NSLog("CyclopOne [Verification]: %d/%d tools errored — moderate penalty", toolErrors.count, toolResults.count)
+                return 30
+            }
+        }
+
         guard !textContent.isEmpty else {
             // No output to analyze — neutral
             return 50
