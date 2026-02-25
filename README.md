@@ -42,16 +42,22 @@ open CyclopOne.xcodeproj
 
 ## Architecture
 
-Cyclop One uses a Swift actor-based architecture for safe concurrency throughout the system:
+> Full architecture diagram and component reference: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+
+[![Architecture Diagram](./docs/architecture.svg)](./docs/ARCHITECTURE.md)
+
+Cyclop One uses a vision-first reactive loop — each iteration takes a fresh screenshot, sends it to Claude with a system prompt, and executes the JSON action returned. No conversation history means ~2.2K tokens per iteration (~87% cheaper than stateful approaches).
 
 | Component | Role |
 |---|---|
-| **AgentLoop** | Core perceive-reason-act cycle. Captures the screen, sends it to Claude, and executes the returned actions. |
-| **Orchestrator** | Manages run lifecycle, exit lock, stuck detection, and verification. The agent cannot self-terminate — the Orchestrator decides when a run is complete. |
-| **VerificationEngine** | Scores task completion using LLM vision with heuristic fallback. |
-| **PluginLoader** | Discovers and runs external plugins via JSON-over-stdio. |
-| **SkillLoader** | Injects skill definitions from markdown files into the agent's context. |
-| **FloatingDot** | The circular on-screen indicator — the "eye" that shows agent state (idle, thinking, acting). |
+| **ReactiveLoopActor** | Default agent loop — perceive → reason → act → evaluate, up to 35 iterations |
+| **Orchestrator** | Run lifecycle, intent classification, budget management, crash recovery |
+| **SkillRegistry** | Loads markdown skill files, matches by regex trigger, injects steps into prompt |
+| **ActionSafetyGate** | Two-phase safety: heuristic rules → LLM fallback, four risk levels |
+| **VerificationEngine** | Scores task completion — Claude Haiku vision primary, pixel/AX diff fallback |
+| **MemoryService** | Obsidian vault-backed memory — 15K token injection budget per run |
+| **ProceduralMemoryService** | App-specific step sequences learned across sessions |
+| **FloatingDot** | 48px NSPanel eye — the only persistent UI surface |
 
 ## Skills
 
