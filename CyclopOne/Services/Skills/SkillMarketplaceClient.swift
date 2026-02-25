@@ -20,7 +20,7 @@ actor SkillMarketplaceClient {
 
     // MARK: - Configuration
 
-    private let registryURL = URL(string: "https://raw.githubusercontent.com/yuvalsuede/skills-hub/main/registry/index.json")!
+    private let registryURL = URL(string: "https://raw.githubusercontent.com/cyclop-one/skills-hub/main/registry/index.json")!
     private var cachedIndex: MarketplaceIndex?
     private var lastFetchDate: Date?
     private let cacheInterval: TimeInterval = 3600  // 1 hour
@@ -161,7 +161,7 @@ actor SkillMarketplaceClient {
 
         // Lightweight install: fetch skill.json directly, no zip required
         if entry.isLightweight {
-            let base = cachedIndex?.baseURL ?? "https://raw.githubusercontent.com/yuvalsuede/skills-hub/main"
+            let base = cachedIndex?.baseURL ?? "https://raw.githubusercontent.com/cyclop-one/skills-hub/main"
             return try await installLightweight(entry: entry, baseURL: base)
         }
 
