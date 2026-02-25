@@ -20,7 +20,7 @@ actor SkillMarketplaceClient {
 
     // MARK: - Configuration
 
-    private let registryURL = URL(string: "https://raw.githubusercontent.com/yuvalsuede/skills-hub/main/registry/skills-index.json")!
+    private let registryURL = URL(string: "https://raw.githubusercontent.com/yuvalsuede/skills-hub/main/registry/index.json")!
     private var cachedIndex: MarketplaceIndex?
     private var lastFetchDate: Date?
     private let cacheInterval: TimeInterval = 3600  // 1 hour
@@ -41,6 +41,8 @@ actor SkillMarketplaceClient {
     struct MarketplaceIndex: Codable, Sendable {
         let version: String
         let updatedAt: Date
+        /// Base URL for constructing lightweight skill download URLs (v2+).
+        let baseURL: String?
         let skills: [MarketplaceSkillEntry]
     }
 
@@ -56,12 +58,21 @@ actor SkillMarketplaceClient {
         let verified: Bool
         let rating: Double?
         let downloads: Int?
-        let downloadURL: String
-        let checksum: String  // "sha256:hexstring"
+        /// Path relative to `baseURL` for fetching `skill.json` directly (lightweight skills).
+        let skillURL: String?
+        /// ZIP download URL (required for skills with executable tools).
+        let downloadURL: String?
+        /// SHA-256 checksum for ZIP packages: "sha256:hexstring"
+        let checksum: String?
         let homepage: String?
-        let hasTools: Bool
+        /// Whether this skill ships custom executables. Defaults to `false` (lightweight).
+        let hasExecutableTools: Bool?
         let permissions: [String]
+
         var id: String { name }
+
+        /// Lightweight skills are prompt+steps only — no executables, install via single JSON fetch.
+        var isLightweight: Bool { !(hasExecutableTools ?? false) }
     }
 
     // MARK: - MarketplaceError
@@ -136,14 +147,23 @@ actor SkillMarketplaceClient {
 
     // MARK: - install
 
-    /// Download, verify, extract, scan, and register a skill package.
+    /// Download, verify, and register a skill package.
+    ///
+    /// **Lightweight skills** (`isLightweight == true`) fetch `skill.json` directly — no zip.
+    /// **Executable skills** download a ZIP, verify checksum, extract, and safety-scan.
     ///
     /// - Parameter entry: The marketplace index entry describing the skill to install.
     /// - Returns: The loaded `SkillPackage` (unapproved; user must approve before tools run).
     /// - Throws: `MarketplaceError` on checksum mismatch, HIGH safety findings, or I/O errors.
     func install(entry: MarketplaceSkillEntry) async throws -> SkillPackage {
-        logger.info("SkillMarketplaceClient: installing '\(entry.name)' v\(entry.version)")
-        NSLog("CyclopOne [SkillMarketplaceClient]: Installing '%@' v%@", entry.name, entry.version)
+        logger.info("SkillMarketplaceClient: installing '\(entry.name)' v\(entry.version) (lightweight=\(entry.isLightweight))")
+        NSLog("CyclopOne [SkillMarketplaceClient]: Installing '%@' v%@ (lightweight=%d)", entry.name, entry.version, entry.isLightweight ? 1 : 0)
+
+        // Lightweight install: fetch skill.json directly, no zip required
+        if entry.isLightweight {
+            let base = cachedIndex?.baseURL ?? "https://raw.githubusercontent.com/yuvalsuede/skills-hub/main"
+            return try await installLightweight(entry: entry, baseURL: base)
+        }
 
         // 1. Ensure install directory exists
         let fm = FileManager.default
@@ -151,11 +171,12 @@ actor SkillMarketplaceClient {
         try? fm.createDirectory(at: skillsDir, withIntermediateDirectories: true)
 
         // 2. Download .skill archive
-        guard let downloadURL = URL(string: entry.downloadURL) else {
-            throw MarketplaceError.invalidManifest("Invalid downloadURL: \(entry.downloadURL)")
+        guard let rawDownloadURL = entry.downloadURL,
+              let downloadURL = URL(string: rawDownloadURL) else {
+            throw MarketplaceError.invalidManifest("Missing or invalid downloadURL for executable skill '\(entry.name)'")
         }
 
-        logger.info("SkillMarketplaceClient: downloading from \(entry.downloadURL)")
+        logger.info("SkillMarketplaceClient: downloading from \(rawDownloadURL)")
         let archiveData: Data
         do {
             let (data, _) = try await URLSession.shared.data(from: downloadURL)
@@ -166,24 +187,23 @@ actor SkillMarketplaceClient {
 
         logger.info("SkillMarketplaceClient: downloaded \(archiveData.count) bytes for '\(entry.name)'")
 
-        // 3. Verify SHA-256 checksum
-        // Expected format: "sha256:hexstring"
-        let expectedChecksum = entry.checksum
-        let computedHex = sha256Hex(archiveData)
-
-        let expectedHex: String
-        if expectedChecksum.hasPrefix("sha256:") {
-            expectedHex = String(expectedChecksum.dropFirst("sha256:".count))
+        // 3. Verify SHA-256 checksum (required for executable skill ZIPs)
+        if let expectedChecksum = entry.checksum {
+            let computedHex = sha256Hex(archiveData)
+            let expectedHex: String
+            if expectedChecksum.hasPrefix("sha256:") {
+                expectedHex = String(expectedChecksum.dropFirst("sha256:".count))
+            } else {
+                expectedHex = expectedChecksum
+            }
+            guard computedHex.lowercased() == expectedHex.lowercased() else {
+                logger.error("SkillMarketplaceClient: checksum mismatch for '\(entry.name)' — expected \(expectedHex), got \(computedHex)")
+                throw MarketplaceError.checksumMismatch(expected: expectedHex, actual: computedHex)
+            }
+            logger.info("SkillMarketplaceClient: checksum verified for '\(entry.name)'")
         } else {
-            expectedHex = expectedChecksum
+            logger.warning("SkillMarketplaceClient: no checksum provided for '\(entry.name)' — skipping verification")
         }
-
-        guard computedHex.lowercased() == expectedHex.lowercased() else {
-            logger.error("SkillMarketplaceClient: checksum mismatch for '\(entry.name)' — expected \(expectedHex), got \(computedHex)")
-            throw MarketplaceError.checksumMismatch(expected: expectedHex, actual: computedHex)
-        }
-
-        logger.info("SkillMarketplaceClient: checksum verified for '\(entry.name)'")
 
         // 4. Write archive to temp file
         let tempArchivePath = "/tmp/skill_\(entry.name)_\(UUID().uuidString).zip"
@@ -243,6 +263,68 @@ actor SkillMarketplaceClient {
         logger.info("SkillMarketplaceClient: '\(entry.name)' installed — user must approve before tools run")
 
         // Return the package; it is unapproved until the user explicitly approves it
+        return pkg
+    }
+
+    // MARK: - installLightweight
+
+    /// Install a lightweight skill (no executables) by fetching its `skill.json` directly.
+    ///
+    /// Lightweight skills are prompt+step guidance only — no binaries, no ZIP extraction.
+    /// The `skill.json` is written to `~/.cyclopone/skills/{name}/skill.json`.
+    private func installLightweight(entry: MarketplaceSkillEntry, baseURL: String) async throws -> SkillPackage {
+        guard let skillPath = entry.skillURL else {
+            throw MarketplaceError.invalidManifest("No skillURL for lightweight install of '\(entry.name)'")
+        }
+
+        let fullURLString = baseURL + skillPath
+        guard let fullURL = URL(string: fullURLString) else {
+            throw MarketplaceError.invalidManifest("Invalid skillURL: \(fullURLString)")
+        }
+
+        logger.info("SkillMarketplaceClient: lightweight install — fetching \(fullURLString)")
+
+        let skillData: Data
+        do {
+            let (data, _) = try await URLSession.shared.data(from: fullURL)
+            skillData = data
+        } catch {
+            throw MarketplaceError.networkError(error)
+        }
+
+        let fm = FileManager.default
+        let destDir = skillsDir.appendingPathComponent(entry.name)
+
+        // Remove existing installation
+        if fm.fileExists(atPath: destDir.path) {
+            try? fm.removeItem(at: destDir)
+        }
+        try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+        let manifestFile = destDir.appendingPathComponent("skill.json")
+        do {
+            try skillData.write(to: manifestFile)
+        } catch {
+            try? fm.removeItem(at: destDir)
+            throw MarketplaceError.installError("Failed to write skill.json: \(error.localizedDescription)")
+        }
+
+        guard let pkg = parseSkillPackage(at: manifestFile, directoryURL: destDir) else {
+            try? fm.removeItem(at: destDir)
+            throw MarketplaceError.invalidManifest("Failed to parse skill.json for '\(entry.name)'")
+        }
+
+        // Lightweight scan — no executables, should always be LOW risk
+        let scanResult = await SkillSafetyScanner.shared.scan(package: pkg)
+        if !scanResult.passed {
+            try? fm.removeItem(at: destDir)
+            throw MarketplaceError.installError("Skill rejected by safety scanner: \(scanResult.riskLevel.rawValue)")
+        }
+
+        await SkillRegistry.shared.reload()
+
+        NSLog("CyclopOne [SkillMarketplaceClient]: Lightweight install '%@' v%@ complete (unapproved)", entry.name, entry.version)
+        logger.info("SkillMarketplaceClient: lightweight '\(entry.name)' installed — user must approve before use")
         return pkg
     }
 
