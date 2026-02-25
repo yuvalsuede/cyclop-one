@@ -339,6 +339,20 @@ actor ActionExecutor {
 
     // MARK: - Permission-Aware AppleScript
 
+    /// Escape a string for safe interpolation into an AppleScript string literal.
+    /// Handles backslashes and double quotes to prevent injection.
+    static func escapeAppleScriptString(_ input: String) -> String {
+        var escaped = input
+        // Escape backslashes first (before escaping quotes which introduce backslashes)
+        escaped = escaped.replacingOccurrences(of: "\\", with: "\\\\")
+        // Escape double quotes
+        escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
+        // Strip newlines/carriage returns to prevent multi-line injection
+        escaped = escaped.replacingOccurrences(of: "\n", with: " ")
+        escaped = escaped.replacingOccurrences(of: "\r", with: " ")
+        return escaped
+    }
+
     /// Execute an AppleScript with tiered permission checks.
     func runAppleScript(_ script: String) async throws -> String {
         // Classify the AppleScript
@@ -438,17 +452,6 @@ actor ActionExecutor {
     }
 
     // MARK: - Open Application
-
-    /// Escape a string for safe interpolation into an AppleScript string literal.
-    /// Handles backslashes and double quotes to prevent injection.
-    private static func escapeAppleScriptString(_ input: String) -> String {
-        var escaped = input
-        // Escape backslashes first (before escaping quotes which introduce backslashes)
-        escaped = escaped.replacingOccurrences(of: "\\", with: "\\\\")
-        // Escape double quotes
-        escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
-        return escaped
-    }
 
     func openApplication(_ name: String) async throws -> String {
         // First try NSWorkspace for the most reliable app launch on macOS.

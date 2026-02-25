@@ -137,8 +137,8 @@ actor ScreenCaptureService {
                   error.localizedDescription)
         }
 
-        // Fallback to CGWindowList
-        if var fallback = captureWithCGWindowList(maxDimension: maxDimension, quality: quality) {
+        // Fallback to CGWindowList (try? preserves optional-chaining semantics)
+        if var fallback = try? captureWithCGWindowList(maxDimension: maxDimension, quality: quality) {
             fallback = await redactPasswordFields(in: fallback)
             return fallback
         }
@@ -194,8 +194,11 @@ actor ScreenCaptureService {
         // which returns physical pixels on Retina displays.
         let screenFrame = Self.screenFrameForDisplay(mainDisplay)
 
-        // SCKit config still needs the capture resolution — use display's actual
-        // pixel dimensions for best quality capture
+        // IMPORTANT: Physical vs Logical pixel split
+        // SCStreamConfiguration.width/height must use physical pixels (mainDisplay.width/height)
+        // for the actual capture resolution. screenFrame above stores logical points from
+        // NSScreen.frame for coordinate mapping. These are intentionally different on Retina
+        // displays where physical pixels = 2x logical points.
         let captureWidth = mainDisplay.width
         let captureHeight = mainDisplay.height
 
@@ -253,10 +256,10 @@ actor ScreenCaptureService {
 
     // MARK: - CGWindowList Fallback
 
-    private func captureWithCGWindowList(maxDimension: Int, quality: Double) -> ScreenCapture? {
+    private func captureWithCGWindowList(maxDimension: Int, quality: Double) throws -> ScreenCapture {
         // GFX-2 FIX: Compute the union of all screen frames for full-desktop capture
         let allScreens = NSScreen.screens
-        guard !allScreens.isEmpty else { return nil }
+        guard !allScreens.isEmpty else { throw CaptureError.noDisplay }
 
         // Union of all screens in CG-space (top-left origin)
         // NSScreen uses bottom-left origin, so we need the union in CG coordinates
@@ -278,7 +281,7 @@ actor ScreenCaptureService {
         ) {
             image = fallback
         } else {
-            return nil
+            throw CaptureError.captureFailed
         }
 
         let width = image.width
@@ -306,7 +309,7 @@ actor ScreenCaptureService {
         }
 
         // Use the union frame for coordinate mapping
-        return try? compressCGImage(
+        return try compressCGImage(
             finalImage,
             width: targetW,
             height: targetH,
@@ -337,6 +340,19 @@ actor ScreenCaptureService {
             unionRect = unionRect.union(cgFrame)
         }
         return unionRect
+    }
+
+    /// Convert an NSScreen frame (AppKit bottom-left origin) to CG-space (top-left origin).
+    /// Used for coordinate mapping so that toScreenCoords() produces correct CGEvent coordinates.
+    /// Formula: Y is flipped relative to the primary screen's height.
+    private static func cgFrame(for screen: NSScreen) -> CGRect {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
+        return CGRect(
+            x: screen.frame.origin.x,
+            y: primaryHeight - screen.frame.origin.y - screen.frame.height,
+            width: screen.frame.width,
+            height: screen.frame.height
+        )
     }
 
     // MARK: - CGWindowList Exclusion
@@ -431,20 +447,13 @@ actor ScreenCaptureService {
             throw CaptureError.compressionFailed
         }
 
-        let base64 = imageData.base64EncodedString()
-
-        // Debug: save screenshot to /tmp so we can inspect what Claude receives
-        let debugPath = "/tmp/omniagent_debug_screenshot.\(mediaType == "image/png" ? "png" : "jpg")"
-        try? imageData.write(to: URL(fileURLWithPath: debugPath))
-
-        NSLog("CyclopOne [ScreenCapture]: Captured %dx%d screenshot (%@), screen frame=%.0fx%.0f, data=%d bytes, base64=%d chars, saved to %@",
+        NSLog("CyclopOne [ScreenCapture]: Captured %dx%d screenshot (%@), screen frame=%.0fx%.0f, data=%d bytes, base64=%d chars",
               width, height, mediaType,
               screenFrame.width, screenFrame.height,
-              imageData.count, base64.count, debugPath)
+              imageData.count, imageData.count * 4 / 3)
 
         return ScreenCapture(
             imageData: imageData,
-            base64: base64,
             width: width,
             height: height,
             mediaType: mediaType,
@@ -561,11 +570,8 @@ actor ScreenCaptureService {
             redactedData = jpegData
         }
 
-        let base64 = redactedData.base64EncodedString()
-
         return ScreenCapture(
             imageData: redactedData,
-            base64: base64,
             width: capture.width,
             height: capture.height,
             mediaType: capture.mediaType,
@@ -574,6 +580,160 @@ actor ScreenCaptureService {
     }
 
     // MARK: - Multi-Monitor Targeted Capture (Sprint 7)
+
+    /// Capture the screen containing the target app's main window.
+    /// Sprint 8: Prefers focused window capture when the target window is >= 800x600,
+    /// reducing screenshot payload by cropping to just the active window + margin.
+    /// Falls back to full-display capture if the PID is nil or window too small.
+    func captureScreen(targetPID: pid_t?, maxDimension: Int = 1568, quality: Double = 0.8) async throws -> ScreenCapture {
+        if let pid = targetPID {
+            // Sprint 8: Try focused window capture first (smaller payload, less noise)
+            if let windowInfo = Self.findMainWindowInfo(pid: pid) {
+                let wb = windowInfo.bounds
+                // Only use focused capture if window is large enough (>= 800x600)
+                // Small windows (dialogs, popovers) need surrounding context
+                if wb.width >= 800 && wb.height >= 600 {
+                    NSLog("CyclopOne [ScreenCapture]: Target PID %d window %.0fx%.0f, using focused capture",
+                          pid, wb.width, wb.height)
+                    return try await captureWindow(
+                        targetPID: pid,
+                        maxDimension: maxDimension,
+                        quality: quality,
+                        padding: 50
+                    )
+                }
+                NSLog("CyclopOne [ScreenCapture]: Target PID %d window %.0fx%.0f too small for focused capture, using display",
+                      pid, wb.width, wb.height)
+            }
+            // Fall back to display-level capture using window center position
+            if let windowPos = Self.findMainWindowPosition(pid: pid) {
+                NSLog("CyclopOne [ScreenCapture]: Target PID %d window at (%.0f, %.0f), capturing that display",
+                      pid, windowPos.x, windowPos.y)
+                return try await captureScreen(containing: windowPos, maxDimension: maxDimension, quality: quality)
+            }
+        }
+        return try await captureScreen(maxDimension: maxDimension, quality: quality)
+    }
+
+    // MARK: - Window-Focused Capture (Sprint 8)
+
+    /// Capture only the target application's main window instead of the full screen.
+    /// Produces a tighter screenshot with less irrelevant content, reducing API token usage.
+    /// Falls back to full-display capture if window bounds cannot be determined.
+    func captureWindow(targetPID: pid_t, maxDimension: Int = 1280, quality: Double = 0.85, padding: Int = 20) async throws -> ScreenCapture {
+        guard let windowInfo = Self.findMainWindowInfo(pid: targetPID) else {
+            NSLog("CyclopOne [ScreenCapture]: No window found for PID %d, falling back to display capture", targetPID)
+            return try await captureScreen(targetPID: targetPID, maxDimension: maxDimension, quality: quality)
+        }
+
+        // Add padding around the window, clamped to screen bounds
+        let wb = windowInfo.bounds
+        let paddedBounds = CGRect(
+            x: wb.origin.x - CGFloat(padding), y: wb.origin.y - CGFloat(padding),
+            width: wb.width + CGFloat(padding * 2), height: wb.height + CGFloat(padding * 2)
+        )
+        let clampedBounds = paddedBounds.intersection(Self.cgSpaceUnionFrame(screens: NSScreen.screens))
+
+        guard !clampedBounds.isNull && clampedBounds.width > 50 && clampedBounds.height > 50 else {
+            NSLog("CyclopOne [ScreenCapture]: Window bounds too small or off-screen, falling back")
+            return try await captureScreen(targetPID: targetPID, maxDimension: maxDimension, quality: quality)
+        }
+
+        setCaptureActive(true)
+        defer { setCaptureActive(false) }
+
+        guard let image = CGWindowListCreateImage(
+            clampedBounds, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]
+        ) else {
+            NSLog("CyclopOne [ScreenCapture]: CGWindowListCreateImage failed for window region, falling back")
+            return try await captureScreen(targetPID: targetPID, maxDimension: maxDimension, quality: quality)
+        }
+
+        // Sprint 8: On Retina displays, .bestResolution returns 2x physical pixels.
+        // Downsample to logical resolution first (divide by screen scale factor),
+        // then apply maxDimension scaling on top. This halves the image data on Retina.
+        let screenScale = Self.mainScreenScaleFactor()
+        let logicalW = Double(image.width) / screenScale
+        let logicalH = Double(image.height) / screenScale
+
+        let scale = min(Double(maxDimension) / logicalW, Double(maxDimension) / logicalH, 1.0)
+        let targetW = Int(logicalW * scale)
+        let targetH = Int(logicalH * scale)
+
+        let finalImage: CGImage
+        // Only resize if dimensions actually differ from source
+        if targetW < image.width || targetH < image.height,
+           let scaled = resizeCGImage(image, to: CGSize(width: targetW, height: targetH)) {
+            finalImage = scaled
+        } else {
+            finalImage = image
+        }
+
+        NSLog("CyclopOne [ScreenCapture]: Window capture PID=%d, bounds=%.0fx%.0f at (%.0f,%.0f), retina=%.1fx, output=%dx%d",
+              targetPID, clampedBounds.width, clampedBounds.height,
+              clampedBounds.origin.x, clampedBounds.origin.y, screenScale, targetW, targetH)
+
+        // screenFrame = clampedBounds so toScreenCoords() maps relative to the window position
+        return try compressCGImage(
+            finalImage, width: targetW, height: targetH, screenFrame: clampedBounds, quality: quality
+        )
+    }
+
+    /// Get main window info (bounds + window ID) for a given PID.
+    /// Returns the largest visible window belonging to the process.
+    static func findMainWindowInfo(pid: pid_t) -> (bounds: CGRect, windowID: CGWindowID)? {
+        guard let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        var bestWindow: (bounds: CGRect, windowID: CGWindowID, area: Double)?
+        for info in windowList {
+            guard let windowPID = info[kCGWindowOwnerPID as String] as? Int32,
+                  windowPID == pid,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let windowNumber = info[kCGWindowNumber as String] as? Int,
+                  let x = bounds["X"] as? Double, let y = bounds["Y"] as? Double,
+                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double,
+                  w > 50 && h > 50 else { continue }
+            let area = w * h
+            let rect = CGRect(x: x, y: y, width: w, height: h)
+            let windowID = CGWindowID(windowNumber)
+            if bestWindow == nil || area > bestWindow!.area {
+                bestWindow = (bounds: rect, windowID: windowID, area: area)
+            }
+        }
+        return bestWindow.map { (bounds: $0.bounds, windowID: $0.windowID) }
+    }
+
+    /// Find the center position of a PID's main window using CGWindowListCopyWindowInfo.
+    /// Validates the center point is within the union of all screen bounds to handle
+    /// secondary monitors with negative coordinates correctly.
+    static func findMainWindowPosition(pid: pid_t) -> CGPoint? {
+        guard let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        // Compute union frame for validating window positions
+        let unionFrame = cgSpaceUnionFrame(screens: NSScreen.screens)
+
+        for info in windowList {
+            guard let windowPID = info[kCGWindowOwnerPID as String] as? Int32,
+                  windowPID == pid,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = bounds["X"] as? Double,
+                  let y = bounds["Y"] as? Double,
+                  let w = bounds["Width"] as? Double,
+                  let h = bounds["Height"] as? Double,
+                  w > 50 && h > 50 else {
+                continue
+            }
+            let center = CGPoint(x: x + w / 2, y: y + h / 2)
+            // Validate center is within screen bounds (handles negative coords on secondary monitors)
+            if unionFrame.contains(center) {
+                return center
+            }
+            NSLog("CyclopOne [ScreenCapture]: Window center (%.0f, %.0f) outside screen union, trying next window", center.x, center.y)
+        }
+        return nil
+    }
 
     /// Capture the specific screen that contains the given CG-space point.
     /// Falls back to the primary screen if the point doesn't land on any screen.
@@ -618,13 +778,7 @@ actor ScreenCaptureService {
 
         // Convert NSScreen frame (AppKit bottom-left origin) to CG-space (top-left origin)
         // so that toScreenCoords() produces correct CGEvent coordinates.
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
-        let screenFrame = CGRect(
-            x: screen.frame.origin.x,
-            y: primaryHeight - screen.frame.origin.y - screen.frame.height,
-            width: screen.frame.width,
-            height: screen.frame.height
-        )
+        let screenFrame = Self.cgFrame(for: screen)
         let captureWidth = scDisplay.width
         let captureHeight = scDisplay.height
 
@@ -663,13 +817,7 @@ actor ScreenCaptureService {
     /// Excludes Cyclop One windows by PID when possible.
     private func captureScreenRectWithCGWindowList(screen: NSScreen, maxDimension: Int, quality: Double) -> ScreenCapture? {
         // Convert NSScreen frame (bottom-left origin) to CG frame (top-left origin)
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
-        let cgRect = CGRect(
-            x: screen.frame.origin.x,
-            y: primaryHeight - screen.frame.origin.y - screen.frame.height,
-            width: screen.frame.width,
-            height: screen.frame.height
-        )
+        let cgRect = Self.cgFrame(for: screen)
 
         // Capture only the target screen rect. Cyclop One windows are excluded by PID
         // in the filtered path. Note: we no longer call captureExcludingOwnWindows()
@@ -702,38 +850,30 @@ actor ScreenCaptureService {
             finalImage = image
         }
 
-        // Convert NSScreen frame (AppKit bottom-left origin) to CG-space (top-left origin)
-        // so that toScreenCoords() produces correct CGEvent coordinates.
-        let cgScreenFrame = CGRect(
-            x: screen.frame.origin.x,
-            y: primaryHeight - screen.frame.origin.y - screen.frame.height,
-            width: screen.frame.width,
-            height: screen.frame.height
-        )
-
         return try? compressCGImage(
             finalImage,
             width: targetW,
             height: targetH,
-            screenFrame: cgScreenFrame,
+            screenFrame: cgRect,
             quality: quality
         )
     }
 
+    /// Sprint 8: Get the main screen's backing scale factor (2.0 on Retina, 1.0 on non-Retina).
+    /// Used to downsample captures from physical pixels to logical resolution.
+    /// Must be called from a context that can reach NSScreen (i.e. not a background queue
+    /// without main thread access). Falls back to 1.0 if unavailable.
+    nonisolated static func mainScreenScaleFactor() -> Double {
+        // NSScreen.main requires MainActor, but backingScaleFactor is safe to read.
+        // Access the screens array which is available from any thread.
+        guard let mainScreen = NSScreen.screens.first else { return 1.0 }
+        return mainScreen.backingScaleFactor
+    }
+
     /// Find the NSScreen containing a CG-space point (top-left origin).
     private static func screenContaining(cgPoint: CGPoint) -> NSScreen? {
-        guard let primaryScreen = NSScreen.screens.first else { return nil }
-        let primaryHeight = primaryScreen.frame.height
-
         for screen in NSScreen.screens {
-            // Convert NSScreen frame to CG-space
-            let cgFrame = CGRect(
-                x: screen.frame.origin.x,
-                y: primaryHeight - screen.frame.origin.y - screen.frame.height,
-                width: screen.frame.width,
-                height: screen.frame.height
-            )
-            if cgFrame.contains(cgPoint) {
+            if cgFrame(for: screen).contains(cgPoint) {
                 return screen
             }
         }
@@ -745,10 +885,12 @@ actor ScreenCaptureService {
 
 struct ScreenCapture {
     let imageData: Data
-    let base64: String
     let width: Int        // Screenshot pixel dimensions (after scaling)
     let height: Int
     let mediaType: String
+
+    /// Base64-encoded image data, computed lazily to avoid double memory.
+    var base64: String { imageData.base64EncodedString() }
 
     /// The screen frame in CG-space (top-left origin, logical points).
     /// For single-monitor: matches primary screen frame.
@@ -781,6 +923,7 @@ enum CaptureError: LocalizedError {
     case compressionFailed
     case permissionDenied
     case displayAsleep
+    case captureFailed
 
     var errorDescription: String? {
         switch self {
@@ -788,6 +931,7 @@ enum CaptureError: LocalizedError {
         case .compressionFailed: return "Failed to compress screenshot (PNG/JPEG encoding failed)."
         case .permissionDenied: return "Screen Recording permission not granted. Open System Settings → Privacy & Security → Screen Recording, enable Cyclop One, then quit and relaunch the app. (Rebuilding the app in Xcode resets this permission.)"
         case .displayAsleep: return "Display is asleep — screen capture unavailable."
+        case .captureFailed: return "Screen capture failed — CGWindowListCreateImage returned nil."
         }
     }
 }

@@ -47,10 +47,22 @@ struct PlanStep: Codable, Sendable {
     /// Helps the Orchestrator distinguish "wrong tool" from "right tool, wrong result."
     let expectedTools: [String]?
 
+    /// Fallback actions to try if the primary action fails.
+    /// The brain can suggest 1-2 alternative approaches per step (e.g.,
+    /// "Use keyboard shortcut Cmd+N instead" if clicking "New" button fails).
+    /// Tried in order before declaring step failure.
+    let alternativeApproaches: [String]?
+
+    /// Step IDs (0-indexed) that must succeed before this step can start.
+    /// If empty/nil, the step only depends on the previous step completing.
+    /// Used to express non-linear dependencies (e.g., step 5 depends on steps 1 AND 3).
+    let dependsOn: [Int]?
+
     init(id: Int, title: String, action: String, expectedOutcome: String,
          requiresConfirmation: Bool = false, maxIterations: Int = 3,
          targetApp: String? = nil, expectedTools: [String]? = nil,
-         criticality: StepCriticality = .normal) {
+         criticality: StepCriticality = .normal,
+         alternativeApproaches: [String]? = nil, dependsOn: [Int]? = nil) {
         self.id = id
         self.title = title
         self.action = action
@@ -60,6 +72,8 @@ struct PlanStep: Codable, Sendable {
         self.targetApp = targetApp
         self.expectedTools = expectedTools
         self.criticality = criticality
+        self.alternativeApproaches = alternativeApproaches
+        self.dependsOn = dependsOn
     }
 }
 
@@ -69,8 +83,8 @@ struct ExecutionPlan: Codable, Sendable {
     /// The original user command this plan addresses.
     let command: String
 
-    /// Ordered steps to execute.
-    let steps: [PlanStep]
+    /// Ordered steps to execute. Mutable to support mid-run replanning.
+    var steps: [PlanStep]
 
     /// Brief summary of the overall approach (for user display and logging).
     let summary: String
@@ -102,17 +116,3 @@ enum StepOutcome: Sendable {
     case skipped(reason: String)
 }
 
-/// Instructions from the brain model when a step deviation is detected.
-enum PlanRevision: Codable, Sendable {
-    /// Replace remaining steps with a new sequence.
-    case replaceRemaining(steps: [PlanStep])
-
-    /// Insert additional steps before the current position.
-    case insertBefore(steps: [PlanStep])
-
-    /// Retry the current step with modified instructions.
-    case retryStep(revisedAction: String)
-
-    /// Abort the plan. The task cannot be completed.
-    case abort(reason: String)
-}

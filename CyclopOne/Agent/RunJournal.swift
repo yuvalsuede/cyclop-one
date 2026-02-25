@@ -37,7 +37,13 @@ actor RunJournal {
     }
 
     /// Close the journal file handle.
+    /// Number of journal write failures during this run.
+    private(set) var writeFailureCount: Int = 0
+
     func close() {
+        if writeFailureCount > 0 {
+            NSLog("CyclopOne [RunJournal]: Closing journal with %d write failures", writeFailureCount)
+        }
         try? fileHandle?.close()
         fileHandle = nil
     }
@@ -46,7 +52,11 @@ actor RunJournal {
 
     /// Append a single event to the journal.
     func append(_ event: RunEvent) {
-        guard let handle = fileHandle else { return }
+        guard let handle = fileHandle else {
+            NSLog("CyclopOne [RunJournal]: Cannot write event — file handle is nil (type=%@)", event.type.rawValue)
+            writeFailureCount += 1
+            return
+        }
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
@@ -54,8 +64,8 @@ actor RunJournal {
             data.append(contentsOf: "\n".utf8)
             handle.write(data)
         } catch {
-            // Journal write failure is non-fatal — log and continue
-            print("[RunJournal] Failed to write event: \(error)")
+            writeFailureCount += 1
+            NSLog("CyclopOne [RunJournal]: Failed to write event (type=%@): %@", event.type.rawValue, error.localizedDescription)
         }
     }
 
@@ -66,7 +76,12 @@ actor RunJournal {
     @discardableResult
     func saveScreenshot(_ data: Data, name: String) -> String {
         let fileURL = runDirectory.appendingPathComponent(name)
-        try? data.write(to: fileURL)
+        do {
+            try data.write(to: fileURL)
+        } catch {
+            writeFailureCount += 1
+            NSLog("CyclopOne [RunJournal]: Failed to save screenshot '%@': %@", name, error.localizedDescription)
+        }
         return name
     }
 
@@ -263,6 +278,8 @@ actor RunJournal {
         var failedDays: Int = 7
         /// Days to keep abandoned runs. Default: 3.
         var abandonedDays: Int = 3
+        /// Maximum total disk usage in bytes before oldest runs are evicted. Default: 500 MB.
+        var maxDiskUsageBytes: Int64 = 500 * 1024 * 1024
     }
 
     /// Terminal state of a run, determined from its journal events.
@@ -357,7 +374,39 @@ actor RunJournal {
             }
         }
 
+        // Disk cap enforcement: if total usage exceeds the cap, delete oldest runs first
+        let usage = diskUsage()
+        if usage.totalBytes > policy.maxDiskUsageBytes {
+            // Re-scan and sort by modification date (oldest first)
+            if let remaining = try? fm.contentsOfDirectory(at: runsDirectory, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                let sorted = remaining.filter { $0.hasDirectoryPath }.sorted { a, b in
+                    let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                    let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                    return dateA < dateB  // oldest first
+                }
+                var currentBytes: Int64 = usage.totalBytes
+                for dir in sorted {
+                    guard currentBytes > policy.maxDiskUsageBytes else { break }
+                    let dirSize = directorySize(dir)
+                    try? fm.removeItem(at: dir)
+                    currentBytes -= Int64(dirSize)
+                    deletedCount += 1
+                }
+            }
+        }
+
         return deletedCount
+    }
+
+    /// Calculate the size of a directory and its contents in bytes.
+    private static func directorySize(_ url: URL) -> Int {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total = 0
+        for case let fileURL as URL in enumerator {
+            total += (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        }
+        return total
     }
 
     /// Remove intermediate screenshots from a completed run, keeping only the

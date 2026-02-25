@@ -28,13 +28,10 @@ actor TelegramService {
     private var botToken: String?
 
     /// Authorized chat ID (only this chat can control the agent).
-    private var authorizedChatID: Int64? {
-        didSet {
-            if let id = authorizedChatID {
-                UserDefaults.standard.set(id, forKey: "telegramChatID")
-            }
-        }
-    }
+    private var authorizedChatID: Int64?
+
+    /// Pending continuation for approval flow — resumed when callback query arrives.
+    private var pendingApprovalContinuation: CheckedContinuation<Bool, Never>?
 
     /// Whether the polling loop is active.
     private var isPolling = false
@@ -65,12 +62,53 @@ actor TelegramService {
 
     private let baseURL = "https://api.telegram.org/bot"
 
+    private static let chatIDKeychainKey = "com.cyclop.one.telegram.chatid"
+
     private init() {
-        // Load saved chat ID
-        let saved = UserDefaults.standard.integer(forKey: "telegramChatID")
-        if saved != 0 {
-            authorizedChatID = Int64(saved)
+        // Load saved chat ID from Keychain (secure storage, not UserDefaults)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.chatIDKeychainKey,
+            kSecReturnData as String: true,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data,
+           let str = String(data: data, encoding: .utf8),
+           let id = Int64(str), id != 0 {
+            authorizedChatID = id
         }
+    }
+
+    // MARK: - Persistence Helpers
+
+    /// Persist the authorized chat ID to Keychain (not UserDefaults — security sensitive).
+    private func persistAuthorizedChatID(_ id: Int64) {
+        let data = "\(id)".data(using: .utf8)!
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.chatIDKeychainKey,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        // Delete existing, then add
+        SecItemDelete(query as CFDictionary)
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status != errSecSuccess {
+            NSLog("CyclopOne [Telegram]: Failed to persist chat ID to Keychain: %d", status)
+        }
+    }
+
+    // MARK: - Network Validation
+
+    /// Validate the bot token via getMe and return the bot username.
+    /// Extracted to keep start() focused on lifecycle orchestration.
+    private func validateAndConnect(token: String) async throws -> String {
+        self.botToken = token
+        let username = try await getMe()
+        return username
     }
 
     // MARK: - Lifecycle
@@ -101,11 +139,9 @@ actor TelegramService {
             return
         }
 
-        self.botToken = token
-
-        // Validate token
+        // Validate token via network call
         do {
-            let me = try await getMe()
+            let me = try await validateAndConnect(token: token)
             self.botUsername = me
             NSLog("CyclopOne [Telegram]: Connected as @%@", me)
         } catch {
@@ -329,6 +365,7 @@ actor TelegramService {
         // /start always works — it registers the chat
         if trimmed.lowercased() == "/start" {
             authorizedChatID = chatID
+            persistAuthorizedChatID(chatID)
             NSLog("CyclopOne [Telegram]: Chat %lld authorized via /start", chatID)
             do {
                 try await sendMessage(
@@ -371,18 +408,27 @@ actor TelegramService {
     }
 
     /// Handle a callback query (inline keyboard button press).
+    /// Resumes the pending approval continuation if one exists.
     private func handleCallbackQuery(_ query: [String: Any]) async {
         guard let queryID = query["id"] as? String,
               let data = query["data"] as? String else { return }
 
-        // Store the callback response for approval polling
-        pendingCallbackResponse = data
-        pendingCallbackQueryID = queryID
-    }
+        let approved = data == "approve"
 
-    /// Pending callback data for approval flow.
-    private var pendingCallbackResponse: String?
-    private var pendingCallbackQueryID: String?
+        // Answer the callback query on Telegram
+        do {
+            try await answerCallbackQuery(
+                queryID: queryID,
+                text: approved ? "Approved" : "Denied"
+            )
+        } catch {}
+
+        // Resume pending approval continuation if present
+        if let continuation = pendingApprovalContinuation {
+            pendingApprovalContinuation = nil
+            continuation.resume(returning: approved)
+        }
+    }
 
     // MARK: - Command Handlers
 
@@ -469,10 +515,13 @@ actor TelegramService {
     // MARK: - Approval Support
 
     /// Send an approval request with inline keyboard buttons and wait for response.
+    /// Uses CheckedContinuation instead of busy-polling. Times out after 300 seconds.
     func requestApproval(chatID: Int64, prompt: String) async -> Bool {
-        // Clear any previous callback response
-        pendingCallbackResponse = nil
-        pendingCallbackQueryID = nil
+        // Cancel any stale pending continuation
+        if let stale = pendingApprovalContinuation {
+            pendingApprovalContinuation = nil
+            stale.resume(returning: false)
+        }
 
         let markup: [String: Any] = [
             "inline_keyboard": [[
@@ -492,35 +541,41 @@ actor TelegramService {
             return false
         }
 
-        // Poll for callback response (up to 5 minutes, checking every 2s)
-        for _ in 0..<150 {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        // Wait for callback via continuation, with 300s timeout
+        let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            self.pendingApprovalContinuation = continuation
 
-            if let response = pendingCallbackResponse,
-               let queryID = pendingCallbackQueryID {
-                pendingCallbackResponse = nil
-                pendingCallbackQueryID = nil
-
-                let approved = response == "approve"
-                do {
-                    try await answerCallbackQuery(
-                        queryID: queryID,
-                        text: approved ? "Approved" : "Denied"
-                    )
-                    try await sendMessage(
-                        chatID: chatID,
-                        text: approved ? "Action approved." : "Action denied."
-                    )
-                } catch {}
-                return approved
+            // Timeout task: resume with false after 300 seconds if not already resumed
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 300_000_000_000) // 300s
+                guard let self = self else { return }
+                if let pending = await self.pendingApprovalContinuation {
+                    // Still waiting — timeout
+                    await self.clearAndResumeApprovalContinuation(approved: false)
+                    NSLog("CyclopOne [Telegram]: Approval timed out for chat %lld", chatID)
+                    do {
+                        try await self.sendMessage(chatID: chatID, text: "Approval timed out — action denied.")
+                    } catch {}
+                }
             }
         }
 
-        NSLog("CyclopOne [Telegram]: Approval timed out for chat %lld", chatID)
         do {
-            try await sendMessage(chatID: chatID, text: "Approval timed out — action denied.")
+            try await sendMessage(
+                chatID: chatID,
+                text: approved ? "Action approved." : "Action denied."
+            )
         } catch {}
-        return false
+
+        return approved
+    }
+
+    /// Helper to clear the pending approval continuation and resume it with a value.
+    private func clearAndResumeApprovalContinuation(approved: Bool) {
+        if let continuation = pendingApprovalContinuation {
+            pendingApprovalContinuation = nil
+            continuation.resume(returning: approved)
+        }
     }
 }
 

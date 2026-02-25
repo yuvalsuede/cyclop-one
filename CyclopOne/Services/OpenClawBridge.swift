@@ -54,6 +54,10 @@ actor OpenClawBridge {
     /// Whether the polling loop is active.
     private var isPolling = false
 
+    /// Generation counter — incremented each time start() is called.
+    /// Poll loops check this to self-terminate when a newer loop exists.
+    private var pollGeneration: Int = 0
+
     /// The last message ID seen per (channel, target) pair, to avoid re-processing.
     private var lastSeenMessageIds: [String: String] = [:]
 
@@ -88,8 +92,10 @@ actor OpenClawBridge {
 
         if !self.config.listeners.isEmpty {
             isPolling = true
+            pollGeneration += 1
+            let gen = pollGeneration
             Task { [weak self] in
-                await self?.pollLoop()
+                await self?.pollLoop(generation: gen)
             }
         } else {
             NSLog("OpenClawBridge: No listeners configured — polling disabled. " +
@@ -101,7 +107,8 @@ actor OpenClawBridge {
     func stop() {
         isPolling = false
         isStarted = false
-        NSLog("OpenClawBridge: Stopped")
+        commandGateway = nil
+        NSLog("CyclopOne [OpenClawBridge]: Stopped")
     }
 
     // MARK: - Send Message
@@ -181,36 +188,14 @@ actor OpenClawBridge {
         return parseMessages(result.stdout)
     }
 
-    // MARK: - Channel Management
-
-    /// List configured channels.
-    /// - Returns: JSON string of configured channels.
-    func listChannels() async throws -> String {
-        let result = try await runCLI(["channels", "list", "--json"])
-        return result.stdout
-    }
-
-    /// Check channel connection status.
-    /// - Returns: Status output from OpenClaw.
-    func channelStatus() async throws -> String {
-        let result = try await runCLI(["channels", "status"])
-        return result.stdout
-    }
-
-    /// Check OpenClaw gateway health.
-    /// - Returns: Health check output.
-    func gatewayHealth() async throws -> String {
-        let result = try await runCLI(["health"])
-        return result.stdout
-    }
-
     // MARK: - Polling Loop
 
     /// Main polling loop that checks for new messages on all configured listeners.
-    private func pollLoop() async {
-        NSLog("OpenClawBridge: Polling loop started for %d listeners", config.listeners.count)
+    /// Each loop is tagged with a generation number; if a newer generation exists, this loop exits.
+    private func pollLoop(generation: Int) async {
+        NSLog("CyclopOne [OpenClawBridge]: Polling loop started (gen %d) for %d listeners", generation, config.listeners.count)
 
-        while isPolling {
+        while isPolling && pollGeneration == generation {
             for (channel, target) in config.listeners {
                 do {
                     let key = "\(channel):\(target)"
@@ -242,10 +227,12 @@ actor OpenClawBridge {
                 }
             }
 
+            // Check generation after sleep — a newer loop may have started
             try? await Task.sleep(nanoseconds: UInt64(config.pollInterval * 1_000_000_000))
+            guard pollGeneration == generation else { break }
         }
 
-        NSLog("OpenClawBridge: Polling loop ended")
+        NSLog("CyclopOne [OpenClawBridge]: Polling loop ended (gen %d)", generation)
     }
 
     /// Submit an incoming OpenClaw message as a Command to the gateway.
@@ -347,6 +334,7 @@ actor OpenClawBridge {
     private let fm = FileManager.default
 
     /// Attempt to resolve the openclaw CLI path dynamically via `which`.
+    /// Uses async continuation with terminationHandler instead of synchronous waitUntilExit().
     private func resolveCLIPath() async {
         do {
             let process = Process()
@@ -365,20 +353,30 @@ actor OpenClawBridge {
             process.standardOutput = pipe
             process.standardError = Pipe()
 
-            try process.run()
-            process.waitUntilExit()
-
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let resolved = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                   !resolved.isEmpty {
-                    config.cliPath = resolved
-                    NSLog("OpenClawBridge: Resolved CLI path to %@", resolved)
+            let resolved: String? = try await withCheckedThrowingContinuation { continuation in
+                process.terminationHandler = { proc in
+                    if proc.terminationStatus == 0 {
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let path = String(data: data, encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        continuation.resume(returning: (path?.isEmpty == false) ? path : nil)
+                    } else {
+                        continuation.resume(returning: nil)
+                    }
+                }
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: error)
                 }
             }
+
+            if let resolved = resolved {
+                config.cliPath = resolved
+                NSLog("CyclopOne [OpenClawBridge]: Resolved CLI path to %@", resolved)
+            }
         } catch {
-            NSLog("OpenClawBridge: Could not resolve CLI path dynamically, using default: %@",
+            NSLog("CyclopOne [OpenClawBridge]: Could not resolve CLI path dynamically, using default: %@",
                   config.cliPath)
         }
     }

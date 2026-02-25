@@ -3,12 +3,23 @@ import AppKit
 import ApplicationServices
 
 /// Reads the UI accessibility tree and performs UI actions (click, type) via AXUIElement.
-/// Marked @MainActor to ensure thread safety: AXUIElement operations must be called
-/// from the main thread per Apple's Accessibility API requirements.
+///
+/// **Important**: This class is intentionally `@MainActor` — NOT an `actor`.
+/// AXUIElement APIs must be called from the main thread per Apple's Accessibility
+/// framework requirements. Converting to `actor` would move calls off the main thread,
+/// causing silent failures or crashes in AX operations.
 @MainActor
 class AccessibilityService {
 
     static let shared = AccessibilityService()
+
+    /// Maximum character count for UI tree summaries sent to Claude.
+    /// Truncation occurs at the last newline within this limit to avoid mid-line cuts.
+    private let maxUITreeChars = 6000
+
+    /// Maximum children to read per AX node. Caps tree width to prevent
+    /// explosion on elements with hundreds of children (e.g., table rows).
+    private let maxChildrenPerNode = 20
 
     private init() {}
 
@@ -91,14 +102,23 @@ class AccessibilityService {
         }
 
         summary += formatNode(tree, indent: 0)
-        // Truncate if too long (keep under ~6000 chars for token efficiency)
-        // Increased from 4000 to 6000 to accommodate deeper trees (maxDepth=6)
-        if summary.count > 6000 {
-            summary = String(summary.prefix(5900)) + "\n… (truncated)"
+        // Truncate at newline boundary if too long (keep under maxUITreeChars for token efficiency)
+        if summary.count > maxUITreeChars {
+            let originalLength = summary.count
+            let truncated = String(summary.prefix(maxUITreeChars))
+            // Cut at the last newline within the limit to avoid mid-line truncation
+            if let lastNewline = truncated.lastIndex(of: "\n") {
+                summary = String(truncated[truncated.startIndex...lastNewline])
+            } else {
+                summary = truncated
+            }
+            summary += "… (truncated — \(originalLength - summary.count) of \(originalLength) chars omitted, limit=\(maxUITreeChars))"
         }
 
-        NSLog("CyclopOne [AccessibilityService]: UI tree for %@ (pid=%d), length=%d chars: %@",
-              appName, pid, summary.count, String(summary.prefix(500)))
+        NSLog("CyclopOne [AccessibilityService]: UI tree for %@ (pid=%d), length=%d chars (truncated=%@): %@",
+              appName, pid, summary.count,
+              summary.count >= maxUITreeChars ? "YES" : "NO",
+              String(summary.prefix(200)))
         return summary
     }
 
@@ -275,38 +295,51 @@ class AccessibilityService {
         }
 
         // Split text into runs of simple ASCII vs. non-ASCII for efficient handling.
-        // Simple ASCII chars are typed one-by-one via CGEvent; non-ASCII runs use pasteboard.
+        // ASCII chars are typed via CGEvent; non-ASCII runs (Hebrew, emoji, etc.) are pasted
+        // as a single Cmd+V per run — never one character at a time, which inserts spaces.
         var currentASCIIRun = ""
+        var currentNonASCIIRun = ""
         var charsTyped = 0
+
+        func flushASCII() async -> ActionResult {
+            guard !currentASCIIRun.isEmpty else { return .ok }
+            let result = await typeASCIIRun(currentASCIIRun, startIndex: charsTyped)
+            charsTyped += currentASCIIRun.count
+            currentASCIIRun = ""
+            return result
+        }
+
+        func flushNonASCII() async -> ActionResult {
+            guard !currentNonASCIIRun.isEmpty else { return .ok }
+            let result = await typeViaPasteboard(currentNonASCIIRun)
+            if !result.success {
+                NSLog("CyclopOne [AccessibilityService]: ❌ typeText — pasteboard fallback failed at char %d",
+                      charsTyped)
+            }
+            charsTyped += currentNonASCIIRun.count
+            currentNonASCIIRun = ""
+            return result
+        }
 
         for character in text {
             if isSimpleASCII(character) {
+                // Flush any pending non-ASCII run before starting ASCII
+                let r = await flushNonASCII()
+                if !r.success { return r }
                 currentASCIIRun.append(character)
             } else {
-                // Flush any pending ASCII run first
-                if !currentASCIIRun.isEmpty {
-                    let result = await typeASCIIRun(currentASCIIRun, startIndex: charsTyped)
-                    if !result.success { return result }
-                    charsTyped += currentASCIIRun.count
-                    currentASCIIRun = ""
-                }
-                // Type this non-ASCII character via pasteboard
-                let result = await typeViaPasteboard(String(character))
-                if !result.success {
-                    NSLog("CyclopOne [AccessibilityService]: ❌ typeText — pasteboard fallback failed at char %d ('%@')",
-                          charsTyped, String(character))
-                    return .failed("Pasteboard typing failed at character \(charsTyped)")
-                }
-                charsTyped += 1
+                // Flush any pending ASCII run before starting non-ASCII
+                let r = await flushASCII()
+                if !r.success { return r }
+                currentNonASCIIRun.append(character)
             }
         }
 
-        // Flush remaining ASCII run
-        if !currentASCIIRun.isEmpty {
-            let result = await typeASCIIRun(currentASCIIRun, startIndex: charsTyped)
-            if !result.success { return result }
-            charsTyped += currentASCIIRun.count
-        }
+        // Flush whichever run is pending at end
+        let r1 = await flushASCII()
+        if !r1.success { return r1 }
+        let r2 = await flushNonASCII()
+        if !r2.success { return r2 }
 
         NSLog("CyclopOne [AccessibilityService]: ✓ typeText — %d chars posted", charsTyped)
         return .ok
@@ -348,9 +381,13 @@ class AccessibilityService {
         keyDown.flags = modifiers
         keyUp.flags = modifiers
 
+        // Set global flag so the AppDelegate Escape-key emergency-stop monitor
+        // does not misinterpret this synthesised key event as a user cancel.
+        agentIsPressingKeys = true
         keyDown.post(tap: .cghidEventTap)
         try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         keyUp.post(tap: .cghidEventTap)
+        agentIsPressingKeys = false
         NSLog("CyclopOne [AccessibilityService]: ✓ pressShortcut(key=%d) posted", keyCode)
         return .ok
     }
@@ -465,6 +502,32 @@ class AccessibilityService {
             ?? ""
 
         return (role: role, label: label)
+    }
+
+    /// Sprint 8: Get the focused element's role, value, and selection info.
+    /// Used by ObserveNode for AX-first verification after type_text and click.
+    func getFocusedElementDetail(targetPID: pid_t?) -> (role: String, value: String?, selectedChildren: Int)? {
+        guard let pid = targetPID else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success else {
+            return nil
+        }
+        let focused = focusedRef as! AXUIElement
+
+        let role = getStringAttribute(focused, kAXRoleAttribute as CFString) ?? "unknown"
+        let value = getStringAttribute(focused, kAXValueAttribute as CFString)
+
+        // Count selected children (useful for detecting menu/list state changes)
+        var selectedCount = 0
+        var selectedRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(focused, kAXSelectedChildrenAttribute as CFString, &selectedRef) == .success,
+           let selected = selectedRef as? [AXUIElement] {
+            selectedCount = selected.count
+        }
+
+        return (role: role, value: value, selectedChildren: selectedCount)
     }
 
     /// Get the title of the frontmost window for the target app.
@@ -667,8 +730,8 @@ class AccessibilityService {
         var childrenRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
            let childArray = childrenRef as? [AXUIElement] {
-            // Limit children to avoid huge trees
-            for child in childArray.prefix(20) {
+            // Cap children per node to prevent tree explosion (see maxChildrenPerNode)
+            for child in childArray.prefix(maxChildrenPerNode) {
                 if let childNode = readElement(child, depth: depth + 1, maxDepth: maxDepth) {
                     children.append(childNode)
                 }
@@ -727,4 +790,23 @@ struct UITreeNode: Sendable {
     let position: CGPoint?
     let size: CGSize?
     let children: [UITreeNode]
+}
+
+// MARK: - Accessibility Errors
+
+enum AccessibilityError: LocalizedError {
+    case permissionDenied
+    case elementNotFound
+    case attributeUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .permissionDenied:
+            return "Accessibility permission not granted. Open System Settings > Privacy & Security > Accessibility, enable Cyclop One, then relaunch."
+        case .elementNotFound:
+            return "The target UI element could not be found in the accessibility tree."
+        case .attributeUnavailable(let attribute):
+            return "The accessibility attribute '\(attribute)' is not available on the target element."
+        }
+    }
 }

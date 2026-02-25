@@ -22,9 +22,11 @@ struct SettingsView: View {
     // Agent behavior
     @AppStorage("maxIterations") private var maxIterations: Double = 15
     @AppStorage("confirmDestructive") private var confirmDestructive: Bool = true
+    @AppStorage("permissionMode") private var permissionMode: String = PermissionMode.standard.rawValue
 
     // Memory Vault
     @State private var legacyVaultExists: Bool = false
+    @AppStorage("vaultPath") private var customVaultPath: String = ""
 
     // Disk usage (Sprint 16)
     @State private var diskUsage: RunJournal.DiskUsageInfo?
@@ -212,7 +214,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Vault location")
                     Spacer()
-                    Text("~/Documents/Obsidian Vault/Cyclop One/")
+                    Text(settingsVaultDisplayPath)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -225,15 +227,8 @@ struct SettingsView: View {
                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
                     }
 
-                    Button("Open in Obsidian") {
-                        let obsidianURL = URL(string: "obsidian://open?vault=Cyclop%20One")!
-                        if NSWorkspace.shared.urlForApplication(toOpen: obsidianURL) != nil {
-                            NSWorkspace.shared.open(obsidianURL)
-                        } else {
-                            // Obsidian not installed — fall back to Finder
-                            let path = MemoryService.shared.vaultRootPath
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-                        }
+                    Button("Choose Folder") {
+                        chooseVaultFolder()
                     }
                 }
 
@@ -247,7 +242,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Your agent's memory is stored as plain Markdown files. Open the vault in Obsidian to browse, search, and edit notes. Changes you make are picked up automatically.")
+                Text("Your agent's memory is stored as plain Markdown files. Open the vault in any text editor to browse, search, and edit notes. Changes you make are picked up automatically.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -259,6 +254,26 @@ struct SettingsView: View {
 
     private var permissionsTab: some View {
         Form {
+            Section("Permission Mode") {
+                Picker("Mode", selection: $permissionMode) {
+                    ForEach(PermissionMode.allCases, id: \.rawValue) { mode in
+                        Text(mode.displayName).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .onChange(of: permissionMode) { _, newValue in
+                    if let mode = PermissionMode(rawValue: newValue) {
+                        coordinator.updatePermissionMode(mode)
+                    }
+                }
+
+                if let mode = PermissionMode(rawValue: permissionMode) {
+                    Text(mode.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             Section("System Permissions") {
                 PermissionRow(
                     name: "Screen Recording",
@@ -397,6 +412,30 @@ struct SettingsView: View {
             await MainActor.run {
                 self.diskUsage = usage
             }
+        }
+    }
+
+    private var settingsVaultDisplayPath: String {
+        if !customVaultPath.isEmpty {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            if customVaultPath.hasPrefix(home) {
+                return "~" + customVaultPath.dropFirst(home.count) + "/"
+            }
+            return customVaultPath + "/"
+        }
+        return "~/Documents/CyclopOne/"
+    }
+
+    private func chooseVaultFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Vault Location"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            customVaultPath = url.path
         }
     }
 

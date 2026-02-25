@@ -54,15 +54,15 @@ enum MetaCommandType: String, Sendable, Codable {
 /// The classifier is stateless: each call is independent.
 actor IntentClassifier {
 
-    /// The model used for classification. Defaults to Opus for accuracy
-    /// on nuanced inputs. Could be swapped to Sonnet for cost savings
-    /// once the prompt is well-tuned.
+    /// The model used for classification. Sprint 5: Downgraded from Opus to
+    /// Sonnet (smart tier) — classification is structured and well-prompted,
+    /// doesn't need deep reasoning.
     private let model: String
 
     /// Confidence threshold below which the classifier returns .clarification.
     private let confidenceThreshold: Double
 
-    init(model: String = "claude-opus-4-6", confidenceThreshold: Double = 0.7) {
+    init(model: String = ModelTier.smart.modelName, confidenceThreshold: Double = 0.7) {
         self.model = model
         self.confidenceThreshold = confidenceThreshold
     }
@@ -70,6 +70,10 @@ actor IntentClassifier {
     /// Recent run context for follow-up awareness.
     /// Stores the last command + outcome so the classifier can interpret follow-ups.
     private var lastRunContext: String?
+
+    /// The last message the agent sent to the user (question, clarification, etc.).
+    /// Used to resolve short confirmatory replies like "yes", "no", "ok", "do it".
+    private var lastAssistantMessage: String?
 
     /// Update the classifier with the most recent run's context.
     func setLastRunContext(command: String, outcome: String, activeApp: String?) {
@@ -80,9 +84,15 @@ actor IntentClassifier {
         lastRunContext = ctx
     }
 
+    /// Store the last assistant message so short follow-ups can be resolved in context.
+    func setLastAssistantMessage(_ message: String) {
+        lastAssistantMessage = message
+    }
+
     /// Clear the run context (e.g., on session reset).
     func clearContext() {
         lastRunContext = nil
+        lastAssistantMessage = nil
     }
 
     /// Classify a user command into an intent.
@@ -104,6 +114,12 @@ actor IntentClassifier {
                 question: "It looks like you sent an empty message. What would you like me to do?",
                 confidence: 1.0
             )
+        }
+
+        // Step 2.5: Fast-track obvious task patterns locally (no API call)
+        if let fastTrack = detectObviousTask(trimmed) {
+            NSLog("CyclopOne [IntentClassifier]: Fast-tracked as simple task (no API call): %@", trimmed)
+            return fastTrack
         }
 
         // Step 3: Call the LLM for nuanced classification
@@ -129,6 +145,75 @@ actor IntentClassifier {
                 confidence: 0.5
             )
         }
+    }
+
+    // MARK: - Fast-Track Detection (Local, No API Call)
+
+    /// Detect obviously actionable commands that don't need LLM classification.
+    /// These patterns are unambiguous desktop automation tasks.
+    private func detectObviousTask(_ command: String) -> Intent? {
+        let lower = command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // "open X" — single-app launch
+        if lower.hasPrefix("open ") && lower.count < 100 {
+            return .task(description: command, complexity: .simple, confidence: 0.97)
+        }
+
+        // "click on X" / "click X"
+        if lower.hasPrefix("click ") {
+            return .task(description: command, complexity: .simple, confidence: 0.95)
+        }
+
+        // "type X" / "type in X"
+        if lower.hasPrefix("type ") {
+            return .task(description: command, complexity: .simple, confidence: 0.95)
+        }
+
+        // "press X" (key press)
+        if lower.hasPrefix("press ") {
+            return .task(description: command, complexity: .simple, confidence: 0.95)
+        }
+
+        // "go to X" / "go to X.com" / "navigate to X"
+        if lower.hasPrefix("go to ") || lower.hasPrefix("navigate to ") {
+            return .task(description: command, complexity: .simple, confidence: 0.95)
+        }
+
+        // "search for X" / "search X"
+        if lower.hasPrefix("search for ") || lower.hasPrefix("search ") {
+            return .task(description: command, complexity: .simple, confidence: 0.93)
+        }
+
+        // "close X" / "quit X"
+        if lower.hasPrefix("close ") || lower.hasPrefix("quit ") {
+            return .task(description: command, complexity: .simple, confidence: 0.95)
+        }
+
+        // "take a screenshot" / "take screenshot"
+        if lower.contains("take") && lower.contains("screenshot") {
+            return .task(description: command, complexity: .simple, confidence: 0.97)
+        }
+
+        // Multi-action commands with "and" — "open X and type Y"
+        if lower.contains(" and ") {
+            let parts = lower.components(separatedBy: " and ")
+            let actionPrefixes = ["open", "click", "type", "press", "go to", "search", "close", "quit", "scroll"]
+            let allActions = parts.allSatisfy { part in
+                let trimmedPart = part.trimmingCharacters(in: .whitespaces)
+                return actionPrefixes.contains(where: { trimmedPart.hasPrefix($0) })
+            }
+            if allActions {
+                let complexity: TaskComplexity = parts.count <= 3 ? .simple : .moderate
+                return .task(description: command, complexity: complexity, confidence: 0.95)
+            }
+        }
+
+        // "send X a message" / "send email to X" / "send message to X"
+        if lower.hasPrefix("send ") && (lower.contains("message") || lower.contains("email")) {
+            return .task(description: command, complexity: .moderate, confidence: 0.93)
+        }
+
+        return nil
     }
 
     // MARK: - Meta-Command Detection (Local, No API Call)
@@ -169,13 +254,20 @@ actor IntentClassifier {
     /// Call the classification model with a structured JSON output prompt.
     private func classifyWithLLM(command: String) async throws -> Intent {
         // Build the user message with context if available
-        var userContent = command
+        var contextParts: [String] = []
         if let ctx = lastRunContext {
-            userContent = "[Context: \(ctx)]\n\nNew message: \(command)"
+            contextParts.append(ctx)
+        }
+        if let lastMsg = lastAssistantMessage, !lastMsg.isEmpty {
+            contextParts.append("Last agent message: \"\(lastMsg)\"")
+        }
+        var userContent = command
+        if !contextParts.isEmpty {
+            userContent = "[Context: \(contextParts.joined(separator: " | "))]\n\nNew message: \(command)"
         }
 
-        let messages: [[String: Any]] = [
-            ["role": "user", "content": userContent]
+        let messages: [APIMessage] = [
+            .userText(userContent)
         ]
 
         let response = try await ClaudeAPIService.shared.sendMessage(
@@ -292,8 +384,11 @@ actor IntentClassifier {
 
     ## Context Awareness
 
-    Messages may include a [Context: ...] prefix showing the previous command, its outcome, \
-    and the currently active app. Use this to interpret follow-up messages:
+    Messages may include a [Context: ...] prefix with one or both of:
+    - "Previous command: X → outcome (active app: Y)" — what the agent just did
+    - "Last agent message: '...'" — the last thing the agent said to the user
+
+    Use this context to interpret follow-up messages:
 
     - If context says "Previous command: open WhatsApp" and new message is "look for John", \
     interpret as **task**: "Search for contact John in WhatsApp" (not ambiguous!)
@@ -303,6 +398,11 @@ actor IntentClassifier {
     **task** continuations of the previous command's context.
     - Even single words like a person's name can be a task if the context implies a search \
     or navigation action in the active app.
+    - If "Last agent message" shows a YES/NO question and new message is "yes", "no", "ok", \
+    "sure", "do it", "go ahead" — interpret as **task** confirming the agent's proposed action. \
+    Description should be the action the agent proposed. Confidence 0.95.
+    - If "Last agent message" shows an ambiguous question and user gives a short reply, \
+    resolve the reply in context of that question — don't return clarification.
 
     ## Critical Rules
 

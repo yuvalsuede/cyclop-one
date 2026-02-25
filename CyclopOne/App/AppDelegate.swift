@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+/// Set this to `true` immediately before posting a CGEvent key press from agent tools,
+/// and back to `false` after. The global Escape hotkey monitor checks this flag to
+/// avoid treating agent-synthesised Escape key events as emergency-stop requests.
+/// (CGEvent.post(tap: .cghidEventTap) DOES fire NSEvent global monitors — the previous
+/// assumption that it wouldn't was incorrect.)
+nonisolated(unsafe) var agentIsPressingKeys: Bool = false
+
 /// Main application delegate. Manages the floating dot, status bar item,
 /// global hotkey, and coordinates all services.
 ///
@@ -35,31 +42,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             AXIsProcessTrustedWithOptions(opts)
         }
 
+        // Start network reachability monitor
+        Task { await NetworkMonitor.shared.start() }
+
         setupStatusBarItem()
         setupFloatingDot()
         setupHotkey()
         setupExternalCommandListener()
 
-        // Sprint 18 fix: Load skills at startup so SkillLoader.matchSkills()
-        // has a populated skills array when Orchestrator.startRun() calls it.
-        Task { await SkillLoader.shared.loadAll() }
-
-        // Load plugins and start watching for changes
-        Task {
-            await PluginLoader.shared.loadAll()
-            await PluginLoader.shared.startWatching()
-        }
+        // SkillRegistry is the unified loader — replaces both SkillLoader and PluginLoader.
+        Task { await SkillRegistry.shared.loadAll() }
 
         // Bootstrap the Obsidian memory vault (create directory structure + seed files)
-        Task { await MemoryService.shared.bootstrap() }
+        Task {
+            await MemoryService.shared.bootstrap()
+            await MemoryService.shared.startSession()
+        }
+
+        // Bootstrap procedural memory store
+        Task {
+            await ProceduralMemoryService.shared.bootstrap()
+        }
+
+        // Enable vision-first reactive loop
+        if !UserDefaults.standard.bool(forKey: "reactiveLoopConfigured") {
+            UserDefaults.standard.set(true, forKey: "useReactiveLoop")
+            UserDefaults.standard.set(true, forKey: "reactiveLoopConfigured")
+        }
 
         checkFirstLaunch()
+
+        // Start Telegram bot if token is configured (load token here to avoid
+        // blocking the TelegramService actor with SecItemCopyMatching)
+        let telegramGW = agentCoordinator.gateway
+        Task.detached {
+            let token = KeychainService.shared.getTelegramToken()
+            await TelegramService.shared.start(gateway: telegramGW, token: token)
+        }
 
         // Sprint 16: Run retention cleanup in the background on launch
         performLaunchCleanup()
 
         // Sprint 16: Check for incomplete runs and offer to resume
         checkForIncompleteRuns()
+
+        // Check for app updates (throttled to once per 24 hours)
+        Task { await UpdateChecker.shared.checkOnLaunch() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -67,6 +95,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Cancel any running agent tasks before quitting
+        agentCoordinator.cancel()
+        // Finalize vault session note
+        let tokens = agentCoordinator.totalTokensUsed
+        Task { await MemoryService.shared.endSession(totalRuns: 0, successCount: 0, totalTokens: tokens) }
+        // Stop network monitor
+        Task { await NetworkMonitor.shared.stop() }
         if let globalMonitor = globalMonitor {
             NSEvent.removeMonitor(globalMonitor)
         }
@@ -84,6 +119,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesMenu), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Run Onboarding Again", action: #selector(showOnboardingMenu), keyEquivalent: ""))
@@ -123,7 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupHotkey() {
         // Monitor when our app is NOT focused
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleHotkeyEvent(event)
+            self?.handleGlobalHotkeyEvent(event)
         }
         // Monitor when our app IS focused
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -146,8 +183,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
 
-        // Escape (no modifiers) — emergency stop running task
-        if event.keyCode == 0x35 && flags.isEmpty {
+        // Escape (no modifiers) — emergency stop for any active state.
+        // This local monitor only fires when CyclopOne itself is focused.
+        // During automation, the target app (e.g. Chrome) is frontmost, so
+        // the agent's CGEvent key presses go there, not here.
+        // Guard: ignore if the agent itself is currently posting a key event.
+        if event.keyCode == 0x35 && flags.isEmpty && !agentIsPressingKeys {
             if agentCoordinator.state.isActive {
                 DispatchQueue.main.async { [weak self] in
                     self?.agentCoordinator.cancel()
@@ -157,6 +198,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        return false
+    }
+
+    @discardableResult
+    private func handleGlobalHotkeyEvent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Cmd+Shift+A — toggle popover
+        if flags == [.command, .shift] && event.keyCode == 0x00 {
+            DispatchQueue.main.async { [weak self] in
+                self?.toggleDotPopover()
+            }
+            return true
+        }
+        // Escape (no modifiers) — global emergency stop.
+        // This fires when any OTHER app is frontmost (Chrome, etc).
+        // NOTE: CGEvent.post(tap: .cghidEventTap) DOES fire this global monitor,
+        // so we must guard against the agent's own synthesised Escape key events
+        // to avoid treating them as user-initiated emergency stops.
+        if event.keyCode == 0x35 && flags.isEmpty && !agentIsPressingKeys {
+            if agentCoordinator.state.isActive {
+                DispatchQueue.main.async { [weak self] in
+                    self?.agentCoordinator.cancel()
+                    NSLog("CyclopOne [AppDelegate]: Emergency stop via global Escape key")
+                }
+                return true
+            }
+        }
         return false
     }
 
@@ -210,6 +278,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         // next launch.
                     }
                 }
+            case "settelegram":
+                if let token = command, !token.isEmpty {
+                    let success = KeychainService.shared.setTelegramToken(token)
+                    NSLog("CyclopOne [AppDelegate]: settelegram result=%@", success ? "OK" : "FAIL")
+                    if success {
+                        let gw = self.agentCoordinator.gateway
+                        let tok = token
+                        Task.detached {
+                            await TelegramService.shared.start(gateway: gw, token: tok)
+                        }
+                    }
+                }
             case "status":
                 let state = self.agentCoordinator.state
                 let axTrusted = AXIsProcessTrusted()
@@ -237,63 +317,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Check for incomplete runs from a previous session (crash recovery).
+    /// All incomplete runs are marked abandoned on startup — the Mac's state
+    /// has changed since the crash, making resume unreliable.
     private func checkForIncompleteRuns() {
         Task {
             let incompleteRunIds = RunJournal.findIncompleteRuns()
             guard !incompleteRunIds.isEmpty else { return }
 
-            NSLog("CyclopOne: Found \(incompleteRunIds.count) incomplete run(s) on launch.")
+            NSLog("CyclopOne: Found %d incomplete run(s) on launch — marking all as abandoned.", incompleteRunIds.count)
 
             for runId in incompleteRunIds {
-                // Check if the run is stale
-                if RunJournal.isRunStale(runId: runId) {
-                    // Replay state BEFORE marking abandoned to avoid redundant replay
-                    let state = RunJournal.replayRunState(runId: runId)
-                    RunJournal.markAbandoned(runId: runId)
-                    if let state = state {
-                        let msg = "Abandoned stale task: \(state.command) (interrupted >1 hour ago)."
-                        NSLog("CyclopOne: \(msg)")
-                        await MainActor.run {
-                            self.agentCoordinator.messages.append(
-                                ChatMessage(role: .system, content: msg)
-                            )
-                        }
+                let state = RunJournal.replayRunState(runId: runId)
+                RunJournal.markAbandoned(runId: runId)
+
+                if let state = state {
+                    let msg = "Previous task interrupted: \(state.command) (was at step \(state.iterationCount)). Marked abandoned."
+                    NSLog("CyclopOne: %@", msg)
+                    await MainActor.run {
+                        self.agentCoordinator.messages.append(
+                            ChatMessage(role: .system, content: msg)
+                        )
                     }
-                    continue
-                }
-
-                // Recent incomplete run — attempt to resume
-                guard let replayedState = RunJournal.replayRunState(runId: runId) else {
-                    continue
-                }
-
-                let resumeMsg = "Resuming interrupted task: \(replayedState.command) (step \(replayedState.iterationCount))..."
-                NSLog("CyclopOne: \(resumeMsg)")
-
-                await MainActor.run {
-                    self.agentCoordinator.messages.append(
-                        ChatMessage(role: .system, content: resumeMsg)
-                    )
-                }
-
-                // Resume via the Orchestrator with local reply channel
-                let replyChannel: (any ReplyChannel)? = await LocalReplyChannel(coordinator: agentCoordinator)
-
-                let result = await agentCoordinator.resumeIncompleteRun(
-                    runId: runId,
-                    replyChannel: replyChannel
-                )
-
-                if let result = result {
-                    let statusText = result.success ? "completed successfully" : "failed: \(result.summary)"
-                    let doneMsg = "Resumed task \(statusText). (\(result.iterations) iterations)"
-                    NSLog("CyclopOne: \(doneMsg)")
                 }
             }
         }
     }
 
     // MARK: - Actions
+
+    @objc private func checkForUpdatesMenu() {
+        Task { await UpdateChecker.shared.checkNow() }
+    }
 
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
@@ -336,7 +390,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showOnboarding() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -351,6 +405,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // during autorelease causes EXC_BAD_ACCESS.
                 self?.onboardingWindow?.orderOut(nil)
                 self?.floatingDot?.orderFront(nil)
+
+                // Start TelegramService if a token was saved during onboarding
+                if let self = self {
+                    let telegramGW = self.agentCoordinator.gateway
+                    Task.detached {
+                        let token = KeychainService.shared.getTelegramToken()
+                        if token != nil {
+                            await TelegramService.shared.start(gateway: telegramGW, token: token)
+                        }
+                    }
+                }
             }
             .environmentObject(agentCoordinator)
         )

@@ -60,6 +60,8 @@ class KeychainService {
 
     /// Store the API key in the Keychain with simple ACLs.
     /// Uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly only (no SecAccessControl).
+    /// Keychain operations run on a background queue to avoid blocking the main thread
+    /// (SecItemDelete can trigger SecurityAgent dialog if old item has different code signature).
     @discardableResult
     func setAPIKey(_ key: String) -> Bool {
         // Always store in memory first — this is the primary source
@@ -68,14 +70,19 @@ class KeychainService {
 
         guard let data = key.data(using: .utf8) else { return true }
 
-        // Also try to store in keychain, but don't fail if SecurityAgent blocks
-        deleteAPIKey()
+        // Persist to Keychain on background thread to avoid blocking main thread
+        // (SecItemDelete can trigger SecurityAgent authorization after rebuild)
+        DispatchQueue.global(qos: .utility).async { [self] in
+            deleteAPIKey()
 
-        let query = hardenedAddQuery(account: account, data: data)
+            let query = hardenedAddQuery(account: account, data: data)
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            logger.warning("SecItemAdd failed: \(status) — using in-memory key only")
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status != errSecSuccess {
+                logger.warning("SecItemAdd failed: \(status) — using in-memory key only")
+            } else {
+                NSLog("CyclopOne [KeychainService]: API key persisted to Keychain")
+            }
         }
         return true
     }
@@ -130,6 +137,84 @@ class KeychainService {
     /// Check if an API key is stored.
     var hasAPIKey: Bool {
         return getAPIKey() != nil
+    }
+
+    // MARK: - Telegram Bot Token
+
+    private let telegramAccount = "telegram-bot-token"
+    private let telegramService = "com.cyclop.one.telegram-token"
+    private var inMemoryTelegramToken: String?
+
+    /// Store the Telegram bot token in the Keychain.
+    @discardableResult
+    func setTelegramToken(_ token: String) -> Bool {
+        inMemoryTelegramToken = token
+        NSLog("CyclopOne [KeychainService]: Telegram token stored in memory (%d chars)", token.count)
+
+        // Persist to Keychain in background to avoid blocking main thread
+        // (SecItemDelete can trigger SecurityAgent dialog after rebuild)
+        guard let data = token.data(using: .utf8) else { return true }
+        DispatchQueue.global(qos: .utility).async { [self] in
+            deleteTelegramToken()
+
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: self.telegramService,
+                kSecAttrAccount as String: self.telegramAccount,
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                kSecAttrSynchronizable as String: false,
+            ]
+
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status != errSecSuccess {
+                logger.warning("Telegram SecItemAdd failed: \(status) — using in-memory token only")
+            }
+        }
+        return true
+    }
+
+    /// Retrieve the Telegram bot token.
+    func getTelegramToken() -> String? {
+        if let token = inMemoryTelegramToken {
+            return token
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: telegramService,
+            kSecAttrAccount as String: telegramAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess, let data = result as? Data else {
+            return nil
+        }
+
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Delete the Telegram bot token from the Keychain.
+    @discardableResult
+    func deleteTelegramToken() -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: telegramService,
+            kSecAttrAccount as String: telegramAccount
+        ]
+
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    /// Check if a Telegram bot token is stored.
+    var hasTelegramToken: Bool {
+        return getTelegramToken() != nil
     }
 
 }

@@ -2,355 +2,26 @@ import AppKit
 import SwiftUI
 import Combine
 
-// MARK: - Popover Content View
+// MARK: - Eye View Model
 
-/// Popover shown when the user clicks the floating dot.
-/// Shows status, command input, stop button, command history, and error history.
-struct DotPopoverView: View {
-    @EnvironmentObject var coordinator: AgentCoordinator
-    @State private var commandText = ""
-    @FocusState private var isCommandFocused: Bool
-    let onDismiss: () -> Void
-
-    /// Past user commands (most recent first, max 10)
-    private var commandHistory: [ChatMessage] {
-        coordinator.messages
-            .filter { $0.role == .user }
-            .suffix(10)
-            .reversed()
-    }
-
-    /// Recent error/warning messages from the agent (most recent first, max 10).
-    /// Filters system messages that contain error or warning indicators.
-    private var errorHistory: [ChatMessage] {
-        coordinator.messages
-            .filter { msg in
-                guard msg.role == .system else { return false }
-                let lower = msg.content.lowercased()
-                return lower.contains("error") ||
-                       lower.contains("warning") ||
-                       lower.contains("failed") ||
-                       lower.contains("cancelled") ||
-                       lower.contains("timed out") ||
-                       lower.contains("abort") ||
-                       lower.contains("stuck")
-            }
-            .suffix(10)
-            .reversed()
-    }
-
-    /// Whether the agent state is in error
-    private var isErrorState: Bool {
-        if case .error = coordinator.state { return true }
-        return false
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Status row
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 6, height: 6)
-                Text(coordinator.state.displayText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(isErrorState ? .red : .secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Spacer()
-
-                if coordinator.state.isActive {
-                    Button(action: {
-                        coordinator.cancel()
-                    }) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 14))
-                            .foregroundColor(.red.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop current task (or press Esc)")
-                }
-            }
-
-            // Confirmation UI — show approve/deny when awaiting confirmation
-            if case .awaitingConfirmation(let action) = coordinator.state {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(action)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.primary)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 8) {
-                        Button("Allow") {
-                            coordinator.approveConfirmation()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
-                        .controlSize(.small)
-
-                        Button("Deny") {
-                            coordinator.denyConfirmation()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-                .padding(8)
-                .background(Color.yellow.opacity(0.1))
-                .cornerRadius(8)
-            }
-
-            // Current task summary — only show when actively running (not idle, not error)
-            if coordinator.state.isActive,
-               let lastMessage = coordinator.messages.last(where: { $0.role == .assistant && !$0.isLoading && !$0.content.isEmpty }) {
-                Text(lastMessage.content)
-                    .font(.system(size: 11))
-                    .foregroundColor(.primary)
-                    .lineLimit(4)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider().opacity(0.3)
-
-            // Command input
-            HStack(spacing: 4) {
-                TextField("Tell me what to do...", text: $commandText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .focused($isCommandFocused)
-                    .onSubmit { submitCommand() }
-                    .disabled(coordinator.state.isActive)
-
-                Button(action: submitCommand) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(commandText.isEmpty || coordinator.state.isActive ? .secondary : .accentColor)
-                }
-                .buttonStyle(.plain)
-                .disabled(commandText.isEmpty || coordinator.state.isActive)
-            }
-            .padding(6)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(8)
-
-            // Error history section — always visible when there are errors
-            if !errorHistory.isEmpty {
-                Divider().opacity(0.3)
-
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundColor(.red.opacity(0.7))
-                    Text("Errors")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.red.opacity(0.8))
-                    Spacer()
-                    Text("\(errorHistory.count)")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(.red.opacity(0.6))
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(errorHistory) { msg in
-                            HStack(alignment: .top, spacing: 6) {
-                                Circle()
-                                    .fill(Color.red.opacity(0.6))
-                                    .frame(width: 4, height: 4)
-                                    .padding(.top, 4)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(msg.content)
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.red.opacity(0.9))
-                                        .lineLimit(2)
-                                        .truncationMode(.tail)
-                                    Text(msg.timestamp, style: .relative)
-                                        .font(.system(size: 8))
-                                        .foregroundColor(.secondary.opacity(0.5))
-                                }
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 80)
-            }
-
-            // Command history section
-            if !commandHistory.isEmpty {
-                Divider().opacity(0.3)
-
-                HStack {
-                    Text("History")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(commandHistory) { msg in
-                            HStack(spacing: 6) {
-                                Image(systemName: "arrow.up.circle")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(.secondary.opacity(0.5))
-                                Text(msg.content)
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary.opacity(0.8))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if !coordinator.state.isActive {
-                                    commandText = msg.content
-                                }
-                            }
-                            .help("Click to reuse this command")
-                        }
-                    }
-                }
-                .frame(maxHeight: 80)
-            }
-
-            // Footer: Clear button + token count
-            Divider().opacity(0.3)
-
-            HStack {
-                Button(action: {
-                    coordinator.clearConversation()
-                }) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 9))
-                        Text("Clear All")
-                            .font(.system(size: 10))
-                    }
-                    .foregroundColor(.secondary.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .disabled(coordinator.state.isActive)
-                .help("Clear all messages, errors, and history")
-
-                Spacer()
-
-                Text("\(coordinator.totalTokensUsed) tokens")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.6))
-            }
-        }
-        .padding(12)
-        .frame(width: 280)
-        .onAppear { isCommandFocused = true }
-    }
-
-    private var statusColor: Color {
-        switch coordinator.state {
-        case .idle, .listening, .done: return .green
-        case .thinking, .capturing: return .orange
-        case .executing: return .blue
-        case .awaitingConfirmation: return .yellow
-        case .error: return .red
-        }
-    }
-
-    private func submitCommand() {
-        let text = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !coordinator.state.isActive else { return }
-        commandText = ""
-        Task {
-            await coordinator.handleUserMessage(text)
-        }
-    }
-}
-
-// MARK: - Status Label Window
-
-/// A separate floating window that shows the current agent status above the eye.
-/// Appears when the agent is active, hides when idle.
+/// Observable model for the EyeView, enabling property updates
+/// without replacing the entire SwiftUI rootView hierarchy.
 @MainActor
-class StatusLabelWindow: NSPanel {
-
-    private var hostingView: NSHostingView<StatusLabelView>!
-    private let labelWidth: CGFloat = 200
-    private let labelHeight: CGFloat = 44
-
-    init() {
-        super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 44),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-
-        level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        hidesOnDeactivate = false
-        isFloatingPanel = true
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        becomesKeyOnlyIfNeeded = true
-        ignoresMouseEvents = true
-
-        let view = StatusLabelView(text: "", color: .blue, onCancel: {})
-        hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: labelWidth, height: labelHeight)
-        contentView = hostingView
-    }
-
-    func update(text: String, color: Color, onCancel: @escaping () -> Void) {
-        hostingView.rootView = StatusLabelView(text: text, color: color, onCancel: onCancel)
-    }
-
-    /// Position this label above the given eye panel frame.
-    func positionAbove(eyeFrame: NSRect) {
-        let x = eyeFrame.midX - labelWidth / 2
-        let y = eyeFrame.maxY + 4
-        setFrameOrigin(NSPoint(x: x, y: y))
-    }
+final class EyeViewModel: ObservableObject {
+    @Published var status: DotStatus = .idle
+    @Published var isRecording: Bool = false
 }
 
-/// SwiftUI view for the floating status label.
-struct StatusLabelView: View {
-    let text: String
-    let color: Color
-    let onCancel: () -> Void
+// MARK: - Observable Eye View
+
+/// Wrapper around EyeView that reads from an EyeViewModel environment object.
+/// This allows FloatingDot to update status/recording via the view model
+/// instead of replacing the hosting view's rootView.
+private struct ObservableEyeView: View {
+    @EnvironmentObject var viewModel: EyeViewModel
 
     var body: some View {
-        if !text.isEmpty {
-            HStack(spacing: 6) {
-                // Animated status dot
-                Circle()
-                    .fill(color)
-                    .frame(width: 6, height: 6)
-
-                Text(text)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Spacer(minLength: 0)
-
-                // Cancel button
-                Button(action: onCancel) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundColor(.white.opacity(0.5))
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(.black.opacity(0.8))
-                    .shadow(color: color.opacity(0.3), radius: 6)
-            )
-            .frame(maxWidth: 200)
-        }
+        EyeView(status: viewModel.status, isRecording: viewModel.isRecording)
     }
 }
 
@@ -361,17 +32,18 @@ struct StatusLabelView: View {
 /// right-click shows context menu.
 /// A separate StatusLabelWindow floats above it showing what the agent is doing.
 @MainActor
-class FloatingDot: NSPanel {
+class FloatingDot: NSPanel, NSPopoverDelegate {
 
     // MARK: - Properties
 
     private let dotSize: CGFloat = 48
     private let panelSize: CGFloat = 64
-    private var hostingView: NSHostingView<EyeView>!
+    private var hostingView: NSHostingView<AnyView>!
+    private let viewModel = EyeViewModel()
     private var statusCancellable: AnyCancellable?
+    private var stepProgressCancellable: AnyCancellable?
     private var popover: NSPopover?
     private weak var coordinator: AgentCoordinator?
-    private var isRecordingActive = false
 
     /// Separate window for status label above the eye.
     private var statusLabel: StatusLabelWindow?
@@ -380,6 +52,23 @@ class FloatingDot: NSPanel {
     private var isDragging = false
     private var dragStartMouseLocation: NSPoint = .zero
     private var dragStartWindowOrigin: NSPoint = .zero
+
+    // MARK: - Circular Hit Test View
+
+    /// An NSView subclass that restricts hit-testing to the inscribed circle,
+    /// ensuring clicks outside the dot's circular shape pass through.
+    private class CircularHitTestView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let center = NSPoint(x: bounds.midX, y: bounds.midY)
+            let radius = min(bounds.width, bounds.height) / 2.0
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            if dx * dx + dy * dy > radius * radius {
+                return nil
+            }
+            return super.hitTest(point)
+        }
+    }
 
     // MARK: - Initialization
 
@@ -394,7 +83,7 @@ class FloatingDot: NSPanel {
         )
 
         configurePanel()
-        setupDotView(coordinator: coordinator)
+        setupDotView()
         setupStatusLabel()
         positionOnScreen()
         subscribeToStateChanges(coordinator: coordinator)
@@ -419,11 +108,25 @@ class FloatingDot: NSPanel {
 
     // MARK: - Dot View
 
-    private func setupDotView(coordinator: AgentCoordinator) {
-        let dotView = EyeView(status: .idle)
-        hostingView = NSHostingView(rootView: dotView)
+    private func setupDotView() {
+        let eyeView = ObservableEyeView()
+            .environmentObject(viewModel)
+
+        hostingView = NSHostingView(rootView: AnyView(eyeView))
         hostingView.frame = NSRect(x: 0, y: 0, width: panelSize, height: panelSize)
-        contentView = hostingView
+
+        // Use CircularHitTestView as contentView so clicks outside
+        // the inscribed circle pass through to windows behind.
+        let hitTestView = CircularHitTestView(frame: NSRect(x: 0, y: 0, width: panelSize, height: panelSize))
+        hitTestView.addSubview(hostingView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: hitTestView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: hitTestView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: hitTestView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: hitTestView.bottomAnchor),
+        ])
+        contentView = hitTestView
     }
 
     // MARK: - Status Label
@@ -442,18 +145,18 @@ class FloatingDot: NSPanel {
             .sink { [weak self] newState in
                 guard let self = self else { return }
                 let dotStatus = DotStatus.from(newState)
-                self.updateEye(dotStatus)
+                self.viewModel.status = dotStatus
                 self.updateStatusLabel(newState)
             }
-    }
-
-    private func updateEye(_ status: DotStatus) {
-        hostingView.rootView = EyeView(status: status, isRecording: isRecordingActive)
-    }
-
-    /// Called by AgentCoordinator to update the dot directly.
-    func updateDotStatus(_ status: DotStatus) {
-        updateEye(status)
+        // Subscribe to step progress for richer status display
+        stepProgressCancellable = coordinator.$stepProgressText
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self, let coord = self.coordinator else { return }
+                if coord.state.isActive {
+                    self.updateStatusLabel(coord.state)
+                }
+            }
     }
 
     private func updateStatusLabel(_ state: AgentState) {
@@ -461,12 +164,22 @@ class FloatingDot: NSPanel {
         let dotStatus = DotStatus.from(state)
 
         if state.isActive {
+            // Show step progress if available, otherwise fall back to state text
+            let displayText: String
+            if let coord = coordinator, !coord.stepProgressText.isEmpty {
+                displayText = coord.stepProgressText
+            } else {
+                displayText = state.displayText
+            }
             label.update(
-                text: state.displayText,
+                text: displayText,
                 color: dotStatus.color,
                 onCancel: { [weak self] in self?.coordinator?.cancel() }
             )
-            label.ignoresMouseEvents = false
+            // Keep ignoresMouseEvents = true so CGEvent clicks from the agent
+            // pass through the label and don't accidentally hit the cancel button.
+            // Users can cancel via the popover or Escape key instead.
+            label.ignoresMouseEvents = true
             label.positionAbove(eyeFrame: self.frame)
 
             if label.alphaValue < 1 {
@@ -498,10 +211,7 @@ class FloatingDot: NSPanel {
         Task {
             await ScreenCaptureService.shared.setCaptureStateHandler { @MainActor [weak self] isCapturing in
                 guard let self = self else { return }
-                self.isRecordingActive = isCapturing
-                if let coordinator = self.coordinator {
-                    self.updateEye(DotStatus.from(coordinator.state))
-                }
+                self.viewModel.isRecording = isCapturing
             }
         }
     }
@@ -619,6 +329,7 @@ class FloatingDot: NSPanel {
         let pop = NSPopover()
         pop.behavior = .transient
         pop.animates = true
+        pop.delegate = self
 
         let popoverView = DotPopoverView(onDismiss: { [weak pop] in
             pop?.close()
@@ -637,11 +348,15 @@ class FloatingDot: NSPanel {
         )
 
         NSApp.activate(ignoringOtherApps: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            pop.contentViewController?.view.window?.makeKey()
-        }
 
         popover = pop
+    }
+
+    // MARK: - NSPopoverDelegate
+
+    func popoverDidShow(_ notification: Notification) {
+        // Make the popover window key synchronously, removing the asyncAfter hack.
+        popover?.contentViewController?.view.window?.makeKey()
     }
 
     // MARK: - Context Menu

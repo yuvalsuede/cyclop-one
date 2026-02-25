@@ -88,7 +88,7 @@ enum DotStatus: Equatable {
 /// The iris color reflects status, the pupil dilates/constricts by state,
 /// and a specular highlight gives it depth. Blinks occasionally.
 struct EyeView: View {
-    let status: DotStatus
+    var status: DotStatus
     let size: CGFloat = 48
     var isRecording: Bool = false
 
@@ -98,7 +98,7 @@ struct EyeView: View {
     @State private var recordingPulse: CGFloat = 1.0
     @State private var animatedPupilSize: CGFloat = 12
     @State private var blinkScaleY: CGFloat = 1.0
-    @State private var blinkTimer: Timer?
+    @State private var blinkTask: Task<Void, Never>?
 
     private let irisSize: CGFloat = 28
 
@@ -172,7 +172,10 @@ struct EyeView: View {
             .clipShape(Circle())
         }
         .frame(width: size + 14, height: size + 14)
-        .id(status)
+        .onChange(of: status) { _, newStatus in
+            updateAnimations(for: newStatus)
+            withAnimation(.easeInOut(duration: 0.4)) { animatedPupilSize = newStatus.pupilSize }
+        }
         .onChange(of: isRecording) { _, recording in
             updateRecordingAnimation(recording)
         }
@@ -180,23 +183,25 @@ struct EyeView: View {
             animatedPupilSize = status.pupilSize
             updateAnimations(for: status)
             updateRecordingAnimation(isRecording)
-            startBlinkTimer()
+            startBlinkLoop()
         }
         .onDisappear {
-            blinkTimer?.invalidate()
-            blinkTimer = nil
+            blinkTask?.cancel()
+            blinkTask = nil
         }
     }
 
-    private func startBlinkTimer() {
-        blinkTimer?.invalidate()
-        scheduleNextBlink()
-    }
-
-    private func scheduleNextBlink() {
-        let interval = Double.random(in: 3.0...7.0)
-        blinkTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
-            DispatchQueue.main.async { performBlink() }
+    private func startBlinkLoop() {
+        blinkTask?.cancel()
+        blinkTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let interval = Double.random(in: 3.0...7.0)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                performBlink()
+                // Wait for blink animation to complete (~0.2s total)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
         }
     }
 
@@ -204,13 +209,11 @@ struct EyeView: View {
         withAnimation(.easeIn(duration: 0.08)) { blinkScaleY = 0.08 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             withAnimation(.easeOut(duration: 0.12)) { blinkScaleY = 1.0 }
-            scheduleNextBlink()
         }
     }
 
     private func updateAnimations(for newStatus: DotStatus) {
         withAnimation(.default) { pulseScale = 1.0; glowOpacity = 0.6 }
-        withAnimation(.easeInOut(duration: 0.4)) { animatedPupilSize = newStatus.pupilSize }
 
         if newStatus.shouldPulse {
             withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
@@ -223,7 +226,8 @@ struct EyeView: View {
                 spinAngle = 360
             }
         } else {
-            spinAngle = 0
+            // Stop spin instantly to avoid stutter when transitioning away from .working
+            withAnimation(.linear(duration: 0)) { spinAngle = 0 }
         }
     }
 

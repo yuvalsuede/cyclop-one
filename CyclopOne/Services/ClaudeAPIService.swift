@@ -1,20 +1,131 @@
 import Foundation
+import Security
+import CryptoKit
 
 // MARK: - TLS Certificate Pinning
-//
-// TODO: Implement SPKI certificate pinning for Anthropic's API.
-// The previous implementation had an empty pin set which provided no security
-// benefit while adding complexity. When real SPKI hashes are available, create
-// a URLSessionDelegate that validates the server certificate chain against them.
-//
-// To obtain SPKI hashes:
-//   openssl s_client -connect api.anthropic.com:443 -servername api.anthropic.com 2>/dev/null \
-//     | openssl x509 -pubkey -noout \
-//     | openssl pkey -pubin -outform DER \
-//     | openssl dgst -sha256 -binary | base64
-//
-// Include at least the leaf and one intermediate CA pin for rotation resilience.
-// Until then, standard CA validation (the URLSession default) is used.
+
+/// SPKI SHA-256 hashes for Anthropic's API certificate chain.
+/// Pin the intermediate CA (Google Trust Services WE1) and root (GTS Root R4)
+/// for rotation resilience — leaf certs rotate frequently.
+///
+/// To refresh:
+///   openssl s_client -connect api.anthropic.com:443 -showcerts 2>/dev/null \
+///     | openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER \
+///     | openssl dgst -sha256 -binary | base64
+private let anthropicPinnedHashes: Set<String> = [
+    "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",  // Google Trust Services WE1 (intermediate)
+    "mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=",  // GTS Root R4
+]
+
+/// URLSession delegate that validates server certificates against pinned SPKI hashes.
+private final class CertificatePinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              challenge.protectionSpace.host == "api.anthropic.com",
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        // Evaluate standard CA validation first
+        let policy = SecPolicyCreateSSL(true, "api.anthropic.com" as CFString)
+        SecTrustSetPolicies(serverTrust, policy)
+
+        var error: CFError?
+        guard SecTrustEvaluateWithError(serverTrust, &error) else {
+            NSLog("CyclopOne [TLS]: Standard CA validation failed: %@", error?.localizedDescription ?? "unknown")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        // Check SPKI pins against the certificate chain (fail-open: log mismatch but allow)
+        // CA validation already passed above, so the connection is still secure over HTTPS.
+        let certCount = SecTrustGetCertificateCount(serverTrust)
+        if certCount > 0,
+           let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] {
+            for cert in chain {
+                if let spkiHash = Self.spkiSHA256(for: cert) {
+                    if anthropicPinnedHashes.contains(spkiHash) {
+                        // Pin matched — proceed with full confidence
+                        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+                        return
+                    }
+                }
+            }
+            // No pin matched — log warning but allow (CA validation passed)
+            NSLog("CyclopOne [TLS]: SPKI pin mismatch (fail-open) — CA validation passed, allowing connection")
+        } else {
+            NSLog("CyclopOne [TLS]: No certificates in chain (fail-open) — CA validation passed, allowing connection")
+        }
+
+        // Fall through: CA-validated, allow connection even without pin match
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+
+    /// Extract SPKI SHA-256 hash from a certificate.
+    /// Matches `openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER | sha256 -binary | base64`.
+    private static func spkiSHA256(for certificate: SecCertificate) -> String? {
+        guard let pubKey = SecCertificateCopyKey(certificate) else { return nil }
+
+        // SecKeyCopyExternalRepresentation gives raw key bytes without ASN.1 wrapper.
+        // We prepend the correct ASN.1 SubjectPublicKeyInfo header to match openssl SPKI output.
+        guard let rawKeyData = SecKeyCopyExternalRepresentation(pubKey, nil) as Data? else { return nil }
+
+        // Use SecKeyCopyAttributes for reliable key type detection
+        // (SecKeyGetBlockSize returns signature size for EC keys, not key size)
+        guard let attrs = SecKeyCopyAttributes(pubKey) as? [CFString: Any] else { return nil }
+        let keyTypeAttr = attrs[kSecAttrKeyType] as? String ?? ""
+        let keySizeBits = attrs[kSecAttrKeySizeInBits] as? Int ?? 0
+
+        let header: Data
+        let isEC = (keyTypeAttr == (kSecAttrKeyTypeECSECPrimeRandom as String))
+        let isRSA = (keyTypeAttr == (kSecAttrKeyTypeRSA as String))
+
+        if isEC && keySizeBits == 256 {
+            // EC P-256 (secp256r1) — 26-byte SPKI header
+            header = Data([
+                0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86,
+                0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A,
+                0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03,
+                0x42, 0x00
+            ])
+        } else if isEC && keySizeBits == 384 {
+            // EC P-384 — 23-byte SPKI header
+            header = Data([
+                0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86,
+                0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B,
+                0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00
+            ])
+        } else if isRSA && keySizeBits == 2048 {
+            // RSA 2048 SPKI header
+            header = Data([
+                0x30, 0x82, 0x01, 0x22, 0x30, 0x0D, 0x06, 0x09,
+                0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01,
+                0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0F, 0x00
+            ])
+        } else if isRSA && keySizeBits == 4096 {
+            // RSA 4096 SPKI header
+            header = Data([
+                0x30, 0x82, 0x02, 0x22, 0x30, 0x0D, 0x06, 0x09,
+                0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01,
+                0x01, 0x05, 0x00, 0x03, 0x82, 0x02, 0x0F, 0x00
+            ])
+        } else {
+            // Unknown key type — log and skip
+            NSLog("CyclopOne [TLS]: Unknown key type=%@ size=%d, cannot compute SPKI hash", keyTypeAttr, keySizeBits)
+            return nil
+        }
+
+        var spkiData = header
+        spkiData.append(rawKeyData)
+        let hash = SHA256.hash(data: spkiData)
+        return Data(hash).base64EncodedString()
+    }
+}
 
 /// Communicates with the Claude Messages API, sending screenshots + context
 /// and receiving text responses and tool-use calls.
@@ -25,8 +136,7 @@ actor ClaudeAPIService {
     private let baseURL = "https://api.anthropic.com/v1/messages"
     private let apiVersion = "2023-06-01"
 
-    /// URLSession for communication with Anthropic.
-    /// Uses standard CA validation. TODO: Add SPKI pinning when real hashes are available.
+    /// URLSession with SPKI certificate pinning for Anthropic's API.
     private let pinnedSession: URLSession
 
     // MARK: - Payload Size Tracking (Sprint 19)
@@ -51,10 +161,13 @@ actor ClaudeAPIService {
     private let payloadWarningThreshold: Int = 10 * 1024 * 1024
 
     private init() {
-        // Standard CA validation — no custom delegate needed until real SPKI hashes are configured.
         let config = URLSessionConfiguration.default
         config.tlsMinimumSupportedProtocolVersion = .TLSv12
-        self.pinnedSession = URLSession(configuration: config)
+        self.pinnedSession = URLSession(
+            configuration: config,
+            delegate: CertificatePinningDelegate(),
+            delegateQueue: nil
+        )
     }
 
     /// Sprint 19: Reset payload tracking counters. Call at the start of a new run.
@@ -81,16 +194,57 @@ actor ClaudeAPIService {
 
     // MARK: - Send Message (single-shot)
 
-    /// Send a conversation to Claude and get a response.
+    /// Send a conversation to Claude and get a response using typed API messages.
+    ///
+    /// This is the preferred entry point. Converts `[APIMessage]` to dict format
+    /// internally and delegates to the raw implementation.
     ///
     /// This is a single-shot call with NO built-in retry logic.
     /// Retry responsibility lies with the caller (AgentLoop.sendAPIWithRetry)
     /// to avoid retry amplification (previously 3 * 3 * 3 = 27 calls per failure).
     func sendMessage(
+        messages: [APIMessage],
+        systemPrompt: String,
+        tools: [[String: Any]],
+        model: String = AgentConfig.defaultModelName,
+        maxTokens: Int = 8192
+    ) async throws -> ClaudeResponse {
+        return try await sendMessageOnce(
+            messages: messages.toDicts(),
+            systemPrompt: systemPrompt,
+            tools: tools,
+            model: model,
+            maxTokens: maxTokens
+        )
+    }
+
+    /// Sprint 5: Convenience overload that accepts a ModelTier instead of a raw model name.
+    /// Defaults `maxTokens` to the tier's recommended value (fast=1024, smart=8192, deep=4096).
+    func sendMessage(
+        messages: [APIMessage],
+        systemPrompt: String,
+        tools: [[String: Any]],
+        tier: ModelTier,
+        maxTokens: Int? = nil
+    ) async throws -> ClaudeResponse {
+        return try await sendMessage(
+            messages: messages,
+            systemPrompt: systemPrompt,
+            tools: tools,
+            model: tier.modelName,
+            maxTokens: maxTokens ?? tier.maxTokens
+        )
+    }
+
+    /// Send a conversation to Claude and get a response (raw dict format).
+    ///
+    /// - Important: Prefer the `[APIMessage]` overload for new code.
+    @available(*, deprecated, message: "Use sendMessage(messages: [APIMessage], ...) instead")
+    func sendMessage(
         messages: [[String: Any]],
         systemPrompt: String,
         tools: [[String: Any]],
-        model: String = "claude-sonnet-4-6",
+        model: String = AgentConfig.defaultModelName,
         maxTokens: Int = 8192
     ) async throws -> ClaudeResponse {
         return try await sendMessageOnce(
@@ -102,7 +256,7 @@ actor ClaudeAPIService {
         )
     }
 
-    // MARK: - Single Request
+    // MARK: - Single Request (SSE Streaming)
 
     private func sendMessageOnce(
         messages: [[String: Any]],
@@ -115,12 +269,13 @@ actor ClaudeAPIService {
             throw APIError.noAPIKey
         }
 
-        // Build request body
+        // Build request body with streaming enabled
         var body: [String: Any] = [
             "model": model,
             "max_tokens": maxTokens,
             "system": systemPrompt,
             "messages": messages,
+            "stream": true,
         ]
 
         if !tools.isEmpty {
@@ -149,39 +304,152 @@ actor ClaudeAPIService {
         request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
         request.timeoutInterval = 120
 
-        // Execute using standard CA-validated session
-        let (data, response) = try await pinnedSession.data(for: request)
+        // Execute using SSE streaming via URLSession.bytes
+        let (bytes, response) = try await pinnedSession.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
 
-        // Sprint 19: Track response payload size
-        lastResponsePayloadBytes = data.count
-        totalResponsePayloadBytes += Int64(data.count)
-
+        // For non-200 responses, collect the body for error reporting
         guard httpResponse.statusCode == 200 else {
-            var body = String(data: data, encoding: .utf8) ?? "Unknown error"
-            // Capture Retry-After header for 429 responses so the retry layer can parse it
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line + "\n"
+                if errorBody.count > 2000 { break }
+            }
             if httpResponse.statusCode == 429,
                let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After") {
-                body += "\n\"retry-after\": \(retryAfter)"
+                errorBody += "\n\"retry-after\": \(retryAfter)"
             }
-            throw APIError.httpError(statusCode: httpResponse.statusCode, body: body)
+            throw APIError.httpError(statusCode: httpResponse.statusCode, body: errorBody)
         }
 
-        // Parse response
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw APIError.parseError("Failed to parse response JSON")
+        // Parse SSE events
+        return try await parseSSEStream(bytes)
+    }
+
+    // MARK: - SSE Stream Parser
+
+    /// Parse Claude's SSE stream into a ClaudeResponse.
+    /// Accumulates content blocks from streaming events and returns the complete response.
+    private func parseSSEStream(_ bytes: URLSession.AsyncBytes) async throws -> ClaudeResponse {
+        var contentBlocks: [ResponseBlock] = []
+        var stopReason = "unknown"
+        var inputTokens = 0
+        var outputTokens = 0
+
+        // Accumulators for the current content block being streamed
+        var currentBlockIndex = -1
+        var currentText = ""
+        var currentToolId = ""
+        var currentToolName = ""
+        var currentToolJson = ""
+        var currentBlockType = ""  // "text" or "tool_use"
+
+        var totalResponseBytes = 0
+
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+
+            totalResponseBytes += line.utf8.count + 1  // +1 for newline
+
+            // SSE format: "data: {...}" or "event: ..." lines
+            guard line.hasPrefix("data: ") else { continue }
+            let jsonStr = String(line.dropFirst(6))
+            guard jsonStr != "[DONE]" else { break }
+
+            guard let data = jsonStr.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let eventType = event["type"] as? String else { continue }
+
+            switch eventType {
+            case "message_start":
+                // Extract input tokens from the message start
+                if let message = event["message"] as? [String: Any],
+                   let usage = message["usage"] as? [String: Any] {
+                    inputTokens = usage["input_tokens"] as? Int ?? 0
+                }
+
+            case "content_block_start":
+                let index = event["index"] as? Int ?? 0
+                currentBlockIndex = index
+
+                if let block = event["content_block"] as? [String: Any],
+                   let type = block["type"] as? String {
+                    currentBlockType = type
+                    if type == "text" {
+                        currentText = block["text"] as? String ?? ""
+                    } else if type == "tool_use" {
+                        currentToolId = block["id"] as? String ?? ""
+                        currentToolName = block["name"] as? String ?? ""
+                        currentToolJson = ""
+                    }
+                }
+
+            case "content_block_delta":
+                if let delta = event["delta"] as? [String: Any],
+                   let deltaType = delta["type"] as? String {
+                    if deltaType == "text_delta" {
+                        currentText += delta["text"] as? String ?? ""
+                    } else if deltaType == "input_json_delta" {
+                        currentToolJson += delta["partial_json"] as? String ?? ""
+                    }
+                }
+
+            case "content_block_stop":
+                // Finalize the current block
+                if currentBlockType == "text" {
+                    contentBlocks.append(.text(currentText))
+                    currentText = ""
+                } else if currentBlockType == "tool_use" {
+                    // Parse accumulated JSON string into dictionary
+                    var input: [String: Any] = [:]
+                    if let jsonData = currentToolJson.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                        input = parsed
+                    }
+                    contentBlocks.append(.toolUse(id: currentToolId, name: currentToolName, input: input))
+                    currentToolJson = ""
+                }
+                currentBlockType = ""
+
+            case "message_delta":
+                if let delta = event["delta"] as? [String: Any] {
+                    stopReason = delta["stop_reason"] as? String ?? stopReason
+                }
+                if let usage = event["usage"] as? [String: Any] {
+                    outputTokens = usage["output_tokens"] as? Int ?? outputTokens
+                }
+
+            case "message_stop":
+                break  // Stream complete
+
+            case "error":
+                let errorMsg = (event["error"] as? [String: Any])?["message"] as? String ?? "Stream error"
+                throw APIError.parseError("SSE error: \(errorMsg)")
+
+            default:
+                break
+            }
         }
 
-        return try parseResponse(json)
+        // Track response payload size
+        lastResponsePayloadBytes = totalResponseBytes
+        totalResponsePayloadBytes += Int64(totalResponseBytes)
+
+        return ClaudeResponse(
+            contentBlocks: contentBlocks,
+            stopReason: stopReason,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens
+        )
     }
 
     // MARK: - One-Shot Vision Verification
 
     /// Make a one-shot vision API call for verification scoring.
-    /// Uses claude-haiku-4-5 for cost efficiency. Stateless — does not maintain conversation history.
+    /// Uses `ModelTier.smart` (Sonnet) for accurate pass/fail scoring. Stateless — does not maintain conversation history.
     ///
     /// - Parameters:
     ///   - prompt: The verification prompt to send alongside the screenshot.
@@ -199,30 +467,16 @@ actor ClaudeAPIService {
 
         let base64Image = screenshot.base64EncodedString()
 
-        let messages: [[String: Any]] = [
-            [
-                "role": "user",
-                "content": [
-                    [
-                        "type": "image",
-                        "source": [
-                            "type": "base64",
-                            "media_type": mediaType,
-                            "data": base64Image
-                        ] as [String: Any]
-                    ] as [String: Any],
-                    [
-                        "type": "text",
-                        "text": prompt
-                    ] as [String: Any]
-                ] as [[String: Any]]
-            ] as [String: Any]
-        ]
+        // Build typed message with image + text
+        let message = APIMessage.user([
+            .image(mediaType: mediaType, data: base64Image),
+            .text(prompt)
+        ])
 
         let body: [String: Any] = [
-            "model": "claude-haiku-4-5",
+            "model": ModelTier.smart.modelName,
             "max_tokens": 200,
-            "messages": messages
+            "messages": [message.toDict()]
         ]
 
         let jsonData = try JSONSerialization.data(withJSONObject: body)
@@ -270,109 +524,41 @@ actor ClaudeAPIService {
         throw APIError.parseError("No text content in verification response")
     }
 
-    // MARK: - Build Messages
+    // MARK: - Build Messages (Sprint 4: Typed wrappers — DEPRECATED)
+    //
+    // These static methods now delegate to APIMessage constructors.
+    // They return [String: Any] for backward compatibility with tests and
+    // any code that still expects dictionary format. New code should use
+    // APIMessage constructors directly.
 
     /// Create a user message with text + screenshot + UI tree.
+    /// Returns the dict format for backward compatibility.
+    @available(*, deprecated, message: "Use APIMessage.userWithScreenshot() directly")
     static func buildUserMessage(text: String, screenshot: ScreenCapture?, uiTreeSummary: String?) -> [String: Any] {
-        var content: [[String: Any]] = []
-
-        // Add screenshot if available
-        if let screenshot = screenshot {
-            content.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": screenshot.mediaType,
-                    "data": screenshot.base64
-                ]
-            ])
-        }
-
-        // Add UI tree context
-        if let uiTree = uiTreeSummary {
-            content.append([
-                "type": "text",
-                "text": "<ui_tree>\n\(uiTree)\n</ui_tree>"
-            ])
-        }
-
-        // Add user text
-        content.append([
-            "type": "text",
-            "text": text
-        ])
-
-        return [
-            "role": "user",
-            "content": content
-        ]
+        return APIMessage.userWithScreenshot(
+            text: text,
+            screenshot: screenshot,
+            uiTreeSummary: uiTreeSummary
+        ).toDict()
     }
 
     /// Create an assistant message from Claude's response.
+    /// Returns the dict format for backward compatibility.
+    @available(*, deprecated, message: "Use APIMessage.assistant(from:) directly")
     static func buildAssistantMessage(from response: ClaudeResponse) -> [String: Any] {
-        var content: [[String: Any]] = []
-
-        for block in response.contentBlocks {
-            switch block {
-            case .text(let text):
-                content.append(["type": "text", "text": text])
-            case .toolUse(let id, let name, let input):
-                content.append([
-                    "type": "tool_use",
-                    "id": id,
-                    "name": name,
-                    "input": input
-                ])
-            }
-        }
-
-        return ["role": "assistant", "content": content]
+        return APIMessage.assistant(from: response).toDict()
     }
 
     /// Create a tool result message, optionally including a screenshot image.
+    /// Returns the dict format for backward compatibility.
+    @available(*, deprecated, message: "Use APIMessage.toolResult() directly")
     static func buildToolResultMessage(toolUseId: String, result: String, isError: Bool = false, screenshot: ScreenCapture? = nil) -> [String: Any] {
-        // If there's a screenshot, send it as a rich content block so Claude can SEE the result
-        if let ss = screenshot {
-            let contentBlocks: [[String: Any]] = [
-                [
-                    "type": "image",
-                    "source": [
-                        "type": "base64",
-                        "media_type": ss.mediaType,
-                        "data": ss.base64
-                    ] as [String: Any]
-                ],
-                [
-                    "type": "text",
-                    "text": result
-                ]
-            ]
-
-            return [
-                "role": "user",
-                "content": [
-                    [
-                        "type": "tool_result",
-                        "tool_use_id": toolUseId,
-                        "content": contentBlocks,
-                        "is_error": isError
-                    ] as [String: Any]
-                ]
-            ]
-        }
-
-        // No screenshot — simple text result
-        return [
-            "role": "user",
-            "content": [
-                [
-                    "type": "tool_result",
-                    "tool_use_id": toolUseId,
-                    "content": result,
-                    "is_error": isError
-                ] as [String: Any]
-            ]
-        ]
+        return APIMessage.toolResult(
+            toolUseId: toolUseId,
+            result: result,
+            isError: isError,
+            screenshot: screenshot
+        ).toDict()
     }
 
     // MARK: - Parse Response

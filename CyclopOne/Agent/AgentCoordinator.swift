@@ -11,6 +11,13 @@ class AgentCoordinator: ObservableObject {
     @Published var isRunning: Bool = false
     @Published var totalTokensUsed: Int = 0
 
+    /// Current step progress for display in the popover and status label.
+    @Published var stepProgressText: String = ""
+    /// Current step index (1-based) for display.
+    @Published var currentStepNumber: Int = 0
+    /// Total number of steps in the current plan.
+    @Published var totalSteps: Int = 0
+
     /// The PID of the app that was frontmost BEFORE Cyclop One's popover stole focus.
     /// Captured in togglePopover() and used by prepareRun() to target the correct app.
     var previousFrontmostPID: pid_t?
@@ -29,7 +36,7 @@ class AgentCoordinator: ObservableObject {
     let gateway: CommandGateway
 
     /// Timeout for destructive action confirmations (seconds).
-    private let confirmationTimeout: TimeInterval = 60
+    private let confirmationTimeout: TimeInterval = 300
 
     init() {
         let config = AgentConfig()
@@ -65,12 +72,6 @@ class AgentCoordinator: ObservableObject {
         }
     }
 
-    /// Update the floating dot to reflect the current agent state.
-    private func updateDotStatus() {
-        let dotStatus = DotStatus.from(state)
-        floatingDot?.updateDotStatus(dotStatus)
-    }
-
     func handleUserMessage(_ text: String) async {
         // CONC-H4: Set isRunning synchronously on @MainActor BEFORE creating
         // the async work. This prevents double-invocation if the user taps
@@ -96,6 +97,14 @@ class AgentCoordinator: ObservableObject {
         let savedPID = previousFrontmostPID
         previousFrontmostPID = nil  // Reset for next run
 
+        // Pass the last assistant message so short follow-ups ("yes", "no", "ok") resolve in context.
+        let lastAssistantMsg = messages
+            .filter { $0.role == .assistant && !$0.isLoading && !$0.content.isEmpty }
+            .last
+        if let lastMsg = lastAssistantMsg {
+            await orchestrator.setLastAssistantMessage(lastMsg.content)
+        }
+
         NSLog("CyclopOne [Coordinator]: Calling orchestrator.startRun... (targetPID: %@)",
               savedPID.map { String($0) } ?? "nil")
         let result = await orchestrator.startRun(
@@ -111,6 +120,10 @@ class AgentCoordinator: ObservableObject {
                 Task { @MainActor in
                     self?.messages.removeAll { $0.isLoading }
                     self?.messages.append(message)
+                    // Parse step progress from system messages like "Step 2/5: Opening Safari"
+                    if message.role == .system, message.content.hasPrefix("Step ") {
+                        self?.parseStepProgress(message.content)
+                    }
                 }
             },
             onConfirmationNeeded: { [weak self] action in
@@ -144,9 +157,27 @@ class AgentCoordinator: ObservableObject {
             if case .error = state {} else { state = .idle }
         }
         isRunning = false
+        // Reset step progress
+        stepProgressText = ""
+        currentStepNumber = 0
+        totalSteps = 0
 
         // Update token count from the run result
         totalTokensUsed += result.totalInputTokens + result.totalOutputTokens
+    }
+
+    // MARK: - Step Progress Parsing
+
+    /// Parse step progress from system messages like "Step 2/5: Opening Safari"
+    private func parseStepProgress(_ text: String) {
+        // Expected format: "Step N/M: title"
+        let pattern = /^Step (\d+)\/(\d+): (.+)$/
+        if let match = text.firstMatch(of: pattern) {
+            currentStepNumber = Int(match.1) ?? 0
+            totalSteps = Int(match.2) ?? 0
+            let title = String(match.3)
+            stepProgressText = "Step \(currentStepNumber)/\(totalSteps): \(title)"
+        }
     }
 
     // MARK: - Confirmation (CONC-1 Fix)
@@ -195,7 +226,7 @@ class AgentCoordinator: ObservableObject {
         }
     }
 
-    /// Called when the 60-second timeout expires without a response.
+    /// Called when the timeout expires without a response.
     private func timeoutConfirmation() {
         guard !confirmationResumed else { return }
         guard let continuation = pendingConfirmation else { return }
@@ -203,8 +234,15 @@ class AgentCoordinator: ObservableObject {
         pendingConfirmation = nil
         confirmationTimeoutTask = nil
         state = .idle
-        messages.append(ChatMessage(role: .system, content: "Confirmation timed out — action denied."))
+        messages.append(ChatMessage(role: .system, content: "Confirmation timed out — stopping run to avoid wasting tokens."))
         continuation.resume(returning: false)
+        // Cancel the run to prevent it from continuing with broken flow
+        // after a critical action was denied due to timeout.
+        Task {
+            await self.agentLoop.cancel()
+            await self.orchestrator.cancelCurrentRun()
+        }
+        isRunning = false
     }
 
     func approveConfirmation() {
@@ -228,6 +266,10 @@ class AgentCoordinator: ObservableObject {
     }
 
     func cancel() {
+        // Log the call stack to diagnose unexpected cancellations
+        NSLog("CyclopOne [Coordinator]: cancel() called — isRunning=%d, state=%@", isRunning ? 1 : 0, String(describing: state))
+        Thread.callStackSymbols.prefix(8).forEach { NSLog("CyclopOne [Coordinator]: cancel stack: %@", $0) }
+
         // Resume any pending confirmation so the agent loop can exit
         if !confirmationResumed, let continuation = pendingConfirmation {
             confirmationResumed = true
@@ -237,7 +279,10 @@ class AgentCoordinator: ObservableObject {
             continuation.resume(returning: false)
         }
 
-        Task { await agentLoop.cancel() }
+        Task {
+            await agentLoop.cancel()
+            await orchestrator.cancelCurrentRun()
+        }
         messages.removeAll { $0.isLoading }
         state = .idle
         isRunning = false
@@ -277,6 +322,10 @@ class AgentCoordinator: ObservableObject {
                 Task { @MainActor in
                     self?.messages.removeAll { $0.isLoading }
                     self?.messages.append(message)
+                    // Parse step progress from system messages like "Step 2/5: Opening Safari"
+                    if message.role == .system, message.content.hasPrefix("Step ") {
+                        self?.parseStepProgress(message.content)
+                    }
                 }
             },
             onConfirmationNeeded: { [weak self] action in
@@ -319,5 +368,10 @@ class AgentCoordinator: ObservableObject {
             role: .assistant,
             content: "Conversation cleared. What would you like me to do?"
         ))
+    }
+
+    /// Update the permission mode (from Settings UI).
+    func updatePermissionMode(_ mode: PermissionMode) {
+        NSLog("CyclopOne [Coordinator]: Permission mode changed to %@", mode.rawValue)
     }
 }

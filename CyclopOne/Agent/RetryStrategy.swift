@@ -98,15 +98,25 @@ func classifyError(_ error: Error) -> ErrorClassification {
                 let retryAfter = parseRetryAfter(from: body)
                 return .rateLimit(retryAfter: retryAfter)
             case 400:
-                // Parse the error body to distinguish credit/billing errors
-                // (which are transient — credits may be topped up) from
+                // Parse the error body to distinguish credit/billing errors from
                 // truly permanent 400 errors (invalid request).
                 if let data = body.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let errorObj = json["error"] as? [String: Any],
-                   let errorType = errorObj["type"] as? String {
+                   let errorObj = json["error"] as? [String: Any] {
+                    let errorType = errorObj["type"] as? String ?? ""
+                    let errorMessage = (errorObj["message"] as? String ?? "").lowercased()
+
+                    // Check error type directly
                     if errorType == "insufficient_credits" || errorType == "billing_error" {
-                        return .rateLimit(retryAfter: 60)  // Retry after 60s for credit issues
+                        return .permanent  // No point retrying — credits won't auto-refill
+                    }
+                    // Check message content for credit/billing keywords
+                    // (Anthropic sometimes sends these as invalid_request_error)
+                    if errorMessage.contains("credit balance") ||
+                       errorMessage.contains("billing") ||
+                       errorMessage.contains("insufficient credits") ||
+                       errorMessage.contains("purchase credits") {
+                        return .permanent  // Credit exhaustion — permanent until user tops up
                     }
                 }
                 return .permanent
