@@ -42,6 +42,10 @@ struct RunLifecycleManager {
     /// does not respond to cancellation within the timeout.
     var cancelWatchdog: Task<Void, Never>?
 
+    /// Optional closure called during cancellation to cancel the outer graph runner Task.
+    /// Set by runFlatLoopViaGraph / runStepDrivenLoop before entering the run loop.
+    var hardCancelAction: (@Sendable () -> Void)?
+
     // MARK: - Run Tracking (Sprint 11)
 
     /// The command text for the current run (for status reporting).
@@ -131,13 +135,18 @@ struct RunLifecycleManager {
         isHardCancelInProgress = true
         isCancellationRequested = true
 
-        // Cancel the iteration Task -- this propagates CancellationError
-        // through every `await` in the AgentLoop call chain
+        // Cancel the per-iteration Task (step-driven loop path)
         if let task = currentIterationTask {
             task.cancel()
             NSLog("CyclopOne [RunLifecycleManager]: Hard cancel -- iteration Task cancelled")
         } else {
             NSLog("CyclopOne [RunLifecycleManager]: Hard cancel -- no active iteration Task")
+        }
+
+        // Cancel the outer graph runner Task (flat/graph loop path)
+        if let action = hardCancelAction {
+            action()
+            NSLog("CyclopOne [RunLifecycleManager]: Hard cancel -- graph runner Task cancelled")
         }
 
         return true
@@ -147,6 +156,8 @@ struct RunLifecycleManager {
     mutating func forceTerminateRun() {
         currentIterationTask?.cancel()
         currentIterationTask = nil
+        hardCancelAction?()
+        hardCancelAction = nil
         cancelWatchdog?.cancel()
         cancelWatchdog = nil
         isHardCancelInProgress = false
@@ -158,6 +169,7 @@ struct RunLifecycleManager {
     /// Clean up cancel infrastructure after a run completes normally.
     mutating func cleanupCancelState() {
         currentIterationTask = nil
+        hardCancelAction = nil
         cancelWatchdog?.cancel()
         cancelWatchdog = nil
         isHardCancelInProgress = false

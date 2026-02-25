@@ -21,6 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var floatingDot: FloatingDot?
     private var statusBarItem: NSStatusItem?
     private var onboardingWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var globalMonitor: Any?
     private var localMonitor: Any?
 
@@ -290,6 +291,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 }
+            case "stop":
+                NSLog("CyclopOne [AppDelegate]: External stop request")
+                self.agentCoordinator.cancel()
             case "status":
                 let state = self.agentCoordinator.state
                 let axTrusted = AXIsProcessTrusted()
@@ -349,13 +353,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await UpdateChecker.shared.checkNow() }
     }
 
-    @objc private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        if #available(macOS 14, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+    @objc func openSettings() {
+        // For LSUIElement agent apps showSettingsWindow: is unreliable.
+        // Manage the settings window directly instead.
+        if let win = settingsWindow, win.isVisible {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
+
+        let settingsView = SettingsView()
+            .environmentObject(agentCoordinator)
+
+        let controller = NSHostingController(rootView: settingsView)
+        let win = NSWindow(contentViewController: controller)
+        win.title = "Cyclop One Settings"
+        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        win.setContentSize(NSSize(width: 520, height: 560))
+        win.center()
+        win.isReleasedWhenClosed = false
+        settingsWindow = win
+
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
     }
 
     @objc private func showOnboardingMenu() {

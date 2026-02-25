@@ -37,7 +37,7 @@ class FloatingDot: NSPanel, NSPopoverDelegate {
     // MARK: - Properties
 
     private let dotSize: CGFloat = 48
-    private let panelSize: CGFloat = 64
+    private let panelSize: CGFloat = 80
     private var hostingView: NSHostingView<AnyView>!
     private let viewModel = EyeViewModel()
     private var statusCancellable: AnyCancellable?
@@ -76,7 +76,7 @@ class FloatingDot: NSPanel, NSPopoverDelegate {
         self.coordinator = coordinator
 
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 64, height: 64),
+            contentRect: NSRect(x: 0, y: 0, width: 80, height: 80),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -387,12 +387,8 @@ class FloatingDot: NSPanel, NSPopoverDelegate {
     }
 
     @objc private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        if #available(macOS 14, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        delegate.openSettings()
     }
 
     @objc private func quitApp() {

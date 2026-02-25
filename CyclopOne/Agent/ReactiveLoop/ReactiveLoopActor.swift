@@ -417,6 +417,8 @@ Look at the screenshot. Then output ONLY this JSON (no markdown, no explanation)
 - Never repeat a failed action — try a different approach.
 - Coordinates: click the CENTER of elements.
 - Web services: Chrome only (Gmail=mail.google.com, WhatsApp=web.whatsapp.com, X=x.com).
+- CRITICAL — browser rule: If a browser is ALREADY open and showing the correct site, NEVER open_application to launch another browser. Use the browser that is already on screen. Only open_application for a browser if NO browser is visible at all.
+- CRITICAL — app rule: If the target app (e.g. Chrome with x.com, Mail, Notes) is already visible on screen, DO NOT open_application — it is already open. Start interacting with it directly.
 
 ## GMAIL COMPOSE RULES (follow precisely)
 - Do NOT click the "To:" label text — type email directly into the To field

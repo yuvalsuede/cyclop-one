@@ -230,13 +230,18 @@ actor Orchestrator {
             if UserDefaults.standard.bool(forKey: "useReactiveLoop") {
                 NSLog("CyclopOne [Orchestrator]: Using ReactiveLoopActor (vision-first mode)")
                 let reactiveLoop = ReactiveLoopActor()
-                let reactiveResult = await reactiveLoop.run(
-                    goal: command,
-                    targetPID: targetPID,
-                    onStateChange: onStateChange,
-                    onMessage: onMessage,
-                    onConfirmationNeeded: onConfirmationNeeded
-                )
+                let reactiveTask = Task<ReactiveRunResult, Never> {
+                    await reactiveLoop.run(
+                        goal: command,
+                        targetPID: targetPID,
+                        onStateChange: onStateChange,
+                        onMessage: onMessage,
+                        onConfirmationNeeded: onConfirmationNeeded
+                    )
+                }
+                lifecycle.hardCancelAction = { reactiveTask.cancel() }
+                let reactiveResult = await reactiveTask.value
+                lifecycle.hardCancelAction = nil
                 // Record completion
                 updateClassifierContext(command: command, result: reactiveResult.toOrchestratorRunResult())
                 lifecycle.endRun()

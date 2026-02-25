@@ -134,6 +134,144 @@ enum SkillRegistryBuiltIn {
                 ],
                 permissions: ["network"],
                 maxIterations: 20
+            ),
+            makePackage(
+                name: "calendar-add-event",
+                version: "1.0.0",
+                description: "Add an event to macOS Calendar app.",
+                triggers: [
+                    #"(?i)\b(add|create|schedule|set\s+up)\s+(an?\s+)?(event|meeting|appointment|call)\b"#,
+                    #"(?i)\b(calendar|remind)\s+(me\s+)?(about|to|that)\b"#,
+                    #"(?i)\bschedule\s+(a\s+)?(meeting|call|appointment)\b"#
+                ],
+                steps: [
+                    "Open Calendar app using open_application with name 'Calendar'",
+                    "Take a screenshot to confirm Calendar is open",
+                    "Press Cmd+N to create a new event, or click the '+' button",
+                    "Type the event title in the title field that appears",
+                    "If a date/time was specified, click on the date field and enter it (e.g. 'tomorrow at 3pm')",
+                    "If a location was specified, click the location field and type it",
+                    "If attendees were specified, click the 'Add Invitees' field and type their emails",
+                    "Press Return or click 'OK' / 'Add' to save the event",
+                    "Take a final screenshot to confirm the event appears in the calendar"
+                ],
+                permissions: [],
+                maxIterations: 15
+            ),
+            makePackage(
+                name: "notes-create",
+                version: "1.0.0",
+                description: "Create a new note in macOS Notes app.",
+                triggers: [
+                    #"(?i)\b(create|add|write|make|new)\s+(a\s+)?note\b"#,
+                    #"(?i)\bnote\s+(down|this|that)\b"#,
+                    #"(?i)\bjot\s+(down|this)\b"#,
+                    #"(?i)\bwrite\s+(this\s+)?(down|in\s+notes)\b"#
+                ],
+                steps: [
+                    "Open Notes app using open_application with name 'Notes'",
+                    "Take a screenshot to confirm Notes is open",
+                    "Press Cmd+N to create a new note",
+                    "The cursor should be in the title area — type the note title if one was specified",
+                    "Press Return to move to the body area",
+                    "Type the note content",
+                    "Take a final screenshot to confirm the note was created with the correct content"
+                ],
+                permissions: [],
+                maxIterations: 12
+            ),
+            makePackage(
+                name: "reminders-add",
+                version: "1.0.0",
+                description: "Add a reminder to macOS Reminders app.",
+                triggers: [
+                    #"(?i)\b(add|set|create)\s+(a\s+)?reminder\b"#,
+                    #"(?i)\bremind\s+me\s+to\b"#,
+                    #"(?i)\bremind\s+me\s+(about|at|on|tomorrow)\b"#,
+                    #"(?i)\bdon'?t\s+let\s+me\s+forget\b"#
+                ],
+                steps: [
+                    "Open Reminders app using open_application with name 'Reminders'",
+                    "Take a screenshot to confirm Reminders is open",
+                    "Click the '+' button or press Cmd+N to add a new reminder",
+                    "Type the reminder text",
+                    "If a date/time was specified, click the info button (ⓘ) next to the reminder and set the date/time",
+                    "Press Return to save the reminder",
+                    "Take a final screenshot to confirm the reminder appears in the list"
+                ],
+                permissions: [],
+                maxIterations: 12
+            ),
+            makePackage(
+                name: "spotify-play",
+                version: "1.0.0",
+                description: "Play music, a playlist, or a specific artist on Spotify.",
+                triggers: [
+                    #"(?i)\b(play|put\s+on|start)\s+.{1,50}\s+on\s+spotify\b"#,
+                    #"(?i)\bspotify\s+(play|open|start)\b"#,
+                    #"(?i)\bplay\s+(some\s+)?(music|songs?|tracks?|playlist|album)\b"#,
+                    #"(?i)\bplay\s+.{1,50}\s+(by|from)\s+\w+"#
+                ],
+                steps: [
+                    "Open Spotify using open_application with name 'Spotify'",
+                    "Take a screenshot to confirm Spotify is open and you are logged in",
+                    "Click the search bar (magnifying glass icon in the left sidebar)",
+                    "Type the song, artist, album, or playlist name to search for",
+                    "Take a screenshot to see the search results",
+                    "Click on the most relevant result (song, album, or artist)",
+                    "If an artist page opened, click the 'Play' button or the first track",
+                    "If a playlist or album opened, click the green 'Play' button",
+                    "Take a final screenshot to confirm music is playing (look for the playback bar at the bottom)"
+                ],
+                permissions: [],
+                maxIterations: 15
+            ),
+            makePackage(
+                name: "slack-send",
+                version: "1.0.0",
+                description: "Send a message to a Slack channel or person via Slack desktop app.",
+                triggers: [
+                    #"(?i)\bslack\b"#,
+                    #"(?i)\bsend\s+(a\s+)?slack\s+(message|msg|dm)\b"#,
+                    #"(?i)\bmessage\s+.{1,40}\s+on\s+slack\b"#,
+                    #"(?i)\bpost\s+(to|in)\s+#?\w+\s+(slack|channel)\b"#
+                ],
+                steps: [
+                    "Open Slack using open_application with name 'Slack'",
+                    "Take a screenshot to confirm Slack is open and you are logged in",
+                    "Press Cmd+K to open the quick switcher, or click the search bar at the top",
+                    "Type the channel name (e.g. #general) or person's name to find the conversation",
+                    "Take a screenshot to see the results, then click the correct channel or person",
+                    "Click the message input box at the bottom of the screen",
+                    "Type the message content",
+                    "Press Return to send the message",
+                    "Take a final screenshot to confirm the message was sent and appears in the conversation"
+                ],
+                permissions: [],
+                maxIterations: 15
+            ),
+            makePackage(
+                name: "notion-create-page",
+                version: "1.0.0",
+                description: "Create a new page in Notion via the web app.",
+                triggers: [
+                    #"(?i)\bnotion\b"#,
+                    #"(?i)\b(create|add|write|make|new)\s+(a\s+)?notion\s+page\b"#,
+                    #"(?i)\badd\s+(this\s+)?to\s+notion\b"#,
+                    #"(?i)\bnotion\s+(page|doc|note)\b"#
+                ],
+                steps: [
+                    "Open Chrome or the default browser using open_application",
+                    "Navigate to https://notion.so — type it in the address bar and press Return",
+                    "Wait for Notion to load; take a screenshot to confirm you are logged in",
+                    "Click the '+ New page' button in the left sidebar, or press Cmd+N if available",
+                    "Type the page title in the large title area at the top",
+                    "Press Return or click below the title to start typing the page content",
+                    "Type or paste the page content",
+                    "Notion auto-saves; take a final screenshot to confirm the page was created"
+                ],
+                permissions: ["network"],
+                maxIterations: 20
             )
         ]
     }

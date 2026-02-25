@@ -40,10 +40,25 @@ class StatusLabelWindow: NSPanel {
         hostingView.rootView = StatusLabelView(text: text, color: color, onCancel: onCancel)
     }
 
-    /// Position this label above the given eye panel frame.
+    /// Position this label relative to the given eye panel frame,
+    /// staying within the visible screen bounds. Prefers above the eye;
+    /// if there is insufficient room, positions below instead.
     func positionAbove(eyeFrame: NSRect) {
-        let x = eyeFrame.midX - labelWidth / 2
-        let y = eyeFrame.maxY + 4
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(eyeFrame.origin) })
+                ?? NSScreen.main else { return }
+        let sf = screen.visibleFrame
+
+        // Preferred: above the eye
+        var x = eyeFrame.midX - labelWidth / 2
+        var y = eyeFrame.maxY + 4
+
+        // If label would go above the screen top, place it below the eye instead
+        if y + labelHeight > sf.maxY {
+            y = eyeFrame.minY - labelHeight - 4
+        }
+        // Clamp horizontally within screen
+        x = max(sf.minX + 4, min(x, sf.maxX - labelWidth - 4))
+
         setFrameOrigin(NSPoint(x: x, y: y))
     }
 }

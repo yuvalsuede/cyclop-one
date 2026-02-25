@@ -64,10 +64,16 @@ extension Orchestrator {
             )
         }
 
-        // Run the graph
+        // Run the graph — wrap in a Task so cancelCurrentRun() can cancel it immediately
+        // via lifecycle.hardCancelAction, even mid-Claude-API-call.
+        let graphRunTask = Task<String, Error> {
+            try await graphConfig.runner.run(state: graphState)
+        }
+        lifecycle.hardCancelAction = { graphRunTask.cancel() }
+
         let finalNode: String
         do {
-            finalNode = try await graphConfig.runner.run(state: graphState)
+            finalNode = try await graphRunTask.value
         } catch is CancellationError {
             return await extractGraphResult(
                 graphState: graphState, runId: runId, command: command,

@@ -33,6 +33,11 @@ struct SettingsView: View {
     @State private var isCleaningUp: Bool = false
     @State private var cleanupMessage: String?
 
+    // Live permission state — polled every 2s so the UI updates after user grants access
+    @State private var screenRecordingGranted: Bool = false
+    @State private var accessibilityGranted: Bool = false
+    @State private var permissionPollTimer: Timer?
+
     private let models = [
         ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5 ($3/$15)"),
         ("claude-sonnet-4-6", "Claude Sonnet 4.6 ($3/$15)"),
@@ -278,12 +283,12 @@ struct SettingsView: View {
                 PermissionRow(
                     name: "Screen Recording",
                     description: "Required to capture screenshots of your desktop",
-                    isGranted: checkScreenRecording()
+                    isGranted: screenRecordingGranted
                 )
                 PermissionRow(
                     name: "Accessibility",
                     description: "Required to read UI elements and perform clicks/keystrokes",
-                    isGranted: AccessibilityService.shared.isAccessibilityEnabled()
+                    isGranted: accessibilityGranted
                 )
 
                 Button("Open System Settings > Privacy") {
@@ -303,6 +308,21 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            refreshPermissions()
+            permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                refreshPermissions()
+            }
+        }
+        .onDisappear {
+            permissionPollTimer?.invalidate()
+            permissionPollTimer = nil
+        }
+    }
+
+    private func refreshPermissions() {
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        accessibilityGranted = AccessibilityService.shared.isAccessibilityEnabled()
     }
 
     // MARK: - Advanced Tab
@@ -402,9 +422,7 @@ struct SettingsView: View {
         }
     }
 
-    private func checkScreenRecording() -> Bool {
-        return CGPreflightScreenCaptureAccess()
-    }
+
 
     private func refreshDiskUsage() {
         Task.detached(priority: .utility) {
