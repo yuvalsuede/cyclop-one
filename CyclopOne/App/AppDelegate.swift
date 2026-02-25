@@ -43,6 +43,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             AXIsProcessTrustedWithOptions(opts)
         }
 
+        // Pre-request Automation permission for System Events (needed for open_url AppleScript via Chrome).
+        // Running this at launch triggers the macOS permission prompt early so the agent never
+        // hits a "Permission denied: wants to send Apple events" error mid-run.
+        Task.detached {
+            let script = NSAppleScript(source: "tell application \"System Events\" to return name of first process")
+            var error: NSDictionary?
+            script?.executeAndReturnError(&error)
+        }
+
         // Start network reachability monitor
         Task { await NetworkMonitor.shared.start() }
 

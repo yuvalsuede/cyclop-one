@@ -84,7 +84,7 @@ struct ScreenCaptureToolHandler {
         }
         do {
             let result = try await executor.openApplication(appName)
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
 
             let newPID = await MainActor.run { () -> pid_t? in
                 let currentPID = ProcessInfo.processInfo.processIdentifier
@@ -155,28 +155,14 @@ struct ScreenCaptureToolHandler {
         Self.lastOpenedURL = urlString
 
         do {
-            // If Chrome is running, navigate its front tab via AppleScript.
-            // This reuses the existing window instead of opening a new tab/window.
-            // For other browsers, fall back to `open <url>`.
-            let chromeRunning = await MainActor.run {
-                NSWorkspace.shared.runningApplications.contains {
-                    $0.bundleIdentifier == "com.google.Chrome"
-                }
+            // Open the URL using NSWorkspace — this works for any default browser
+            // and requires no special permissions.  We also activate Chrome (or
+            // whatever browser picked it up) afterwards so the window is in front.
+            let openedOK = await MainActor.run {
+                NSWorkspace.shared.open(URL(string: urlString)!)
             }
-            if chromeRunning {
-                let escaped = urlString.replacingOccurrences(of: "\"", with: "\\\"")
-                let script = """
-                tell application "Google Chrome"
-                    if (count of windows) > 0 then
-                        set URL of active tab of front window to "\(escaped)"
-                    else
-                        open location "\(escaped)"
-                    end if
-                    activate
-                end tell
-                """
-                _ = try? await executor.runAppleScript(script)
-            } else {
+            if !openedOK {
+                // Fallback: shell `open` command
                 let safeURL = ActionExecutor.escapeShellArgument(urlString)
                 _ = try await executor.runShellCommand("open \(safeURL)", timeout: 10)
             }

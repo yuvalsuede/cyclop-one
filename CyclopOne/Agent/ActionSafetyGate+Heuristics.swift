@@ -55,6 +55,25 @@ extension ActionSafetyGate {
             ))
         }
 
+        // Social media sites (x.com, twitter, facebook, etc.): "post", "submit", "publish"
+        // clicks are expected and user-initiated — auto-approve to avoid blocking tweet/post tasks.
+        let socialDomains = ["x.com", "twitter.com", "facebook.com", "instagram.com",
+                             "linkedin.com", "reddit.com", "tiktok.com", "bsky.app",
+                             "mastodon", "threads.net"]
+        let currentHost = (context.currentURL.flatMap { URL(string: $0)?.host?.lowercased() }) ?? ""
+        let isOnSocialSite = socialDomains.contains(where: { currentHost.contains($0) })
+
+        let socialSafePatterns = ["post", "submit", "publish", "send"]
+        if isOnSocialSite && socialSafePatterns.contains(where: { elementDesc.contains($0) }) {
+            return .definite(RiskVerdict(
+                level: .moderate,
+                reason: "Post/send on social site: \(currentHost) — auto-approved",
+                tool: toolCall.name,
+                requiresApproval: false,
+                approvalPrompt: nil
+            ))
+        }
+
         let highPatterns = [
             "send", "submit", "post", "publish", "delete", "remove",
             "trash", "confirm", "sign out", "log out", "unsubscribe",
