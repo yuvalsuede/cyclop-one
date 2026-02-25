@@ -155,10 +155,31 @@ struct ScreenCaptureToolHandler {
         Self.lastOpenedURL = urlString
 
         do {
-            // Use plain `open URL` — macOS routes to the default/running browser.
-            // No AppleScript. No browser detection. One tab, one time.
-            let safeURL = ActionExecutor.escapeShellArgument(urlString)
-            _ = try await executor.runShellCommand("open \(safeURL)", timeout: 10)
+            // If Chrome is running, navigate its front tab via AppleScript.
+            // This reuses the existing window instead of opening a new tab/window.
+            // For other browsers, fall back to `open <url>`.
+            let chromeRunning = await MainActor.run {
+                NSWorkspace.shared.runningApplications.contains {
+                    $0.bundleIdentifier == "com.google.Chrome"
+                }
+            }
+            if chromeRunning {
+                let escaped = urlString.replacingOccurrences(of: "\"", with: "\\\"")
+                let script = """
+                tell application "Google Chrome"
+                    if (count of windows) > 0 then
+                        set URL of active tab of front window to "\(escaped)"
+                    else
+                        open location "\(escaped)"
+                    end if
+                    activate
+                end tell
+                """
+                _ = try? await executor.runAppleScript(script)
+            } else {
+                let safeURL = ActionExecutor.escapeShellArgument(urlString)
+                _ = try await executor.runShellCommand("open \(safeURL)", timeout: 10)
+            }
 
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             await context.updateTargetPID()

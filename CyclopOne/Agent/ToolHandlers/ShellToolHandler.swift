@@ -51,7 +51,7 @@ struct ShellToolHandler {
         executor: ActionExecutor,
         onMessage: @Sendable @escaping (ChatMessage) -> Void
     ) async -> ToolResult {
-        guard let command = input["command"] as? String else {
+        guard let command = (input["command"] as? String) ?? (input["cmd"] as? String) else {
             return ToolResult(result: "Error: missing 'command'", isError: true)
         }
         do {

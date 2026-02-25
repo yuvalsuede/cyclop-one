@@ -463,7 +463,9 @@ Clicking coordinates often misses in floating/nested windows.
 If type_text shows nothing in the screenshot: then click the field and try again.
 
 ## AVAILABLE ACTIONS
-click(x,y) | type_text(text) | press_key(key) | open_url(url) | open_application(name) | scroll(x,y,direction,amount) | right_click(x,y) | take_screenshot() | run_shell_command(cmd)
+click(x,y) | type_text(text) | press_key(key) | open_url(url) | open_application(name) | scroll(x,y,direction,amount) | right_click(x,y) | take_screenshot() | run_shell_command(command)
+- press_key supports modifier combos: {"key": "cmd+l"}, {"key": "cmd+shift+s"}, {"key": "ctrl+a"}
+- run_shell_command requires {"command": "..."} — the parameter is named "command" not "cmd"
 """
     }
 }

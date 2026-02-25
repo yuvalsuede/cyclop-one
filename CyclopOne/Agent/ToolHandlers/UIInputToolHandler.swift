@@ -107,16 +107,37 @@ struct UIInputToolHandler {
         accessibility: AccessibilityService,
         executor: ActionExecutor
     ) async -> ToolResult {
-        guard let keyName = input["key"] as? String else {
+        guard let rawKeyName = input["key"] as? String else {
             return ToolResult(result: "Error: missing 'key'", isError: true)
         }
-        guard let keyCode = ActionExecutor.keyCodes[keyName.lowercased()] else {
-            return ToolResult(result: "Error: unknown key '\(keyName)'", isError: true)
+
+        // Parse modifier+key combos like "cmd+l", "ctrl+a", "shift+tab", "cmd+shift+s"
+        var cmd = input["command"] as? Bool ?? false
+        var shift = input["shift"] as? Bool ?? false
+        var opt = input["option"] as? Bool ?? false
+        var ctrl = input["control"] as? Bool ?? false
+
+        let parts = rawKeyName.lowercased().components(separatedBy: "+")
+        let baseKeyName: String
+        if parts.count > 1 {
+            baseKeyName = parts.last ?? rawKeyName.lowercased()
+            for mod in parts.dropLast() {
+                switch mod {
+                case "cmd", "command": cmd = true
+                case "shift": shift = true
+                case "opt", "option", "alt": opt = true
+                case "ctrl", "control": ctrl = true
+                default: break
+                }
+            }
+        } else {
+            baseKeyName = rawKeyName.lowercased()
         }
-        let cmd = input["command"] as? Bool ?? false
-        let shift = input["shift"] as? Bool ?? false
-        let opt = input["option"] as? Bool ?? false
-        let ctrl = input["control"] as? Bool ?? false
+
+        guard let keyCode = ActionExecutor.keyCodes[baseKeyName] else {
+            return ToolResult(result: "Error: unknown key '\(baseKeyName)'", isError: true)
+        }
+        let keyName = baseKeyName
 
         await context.activateTargetApp()
 
